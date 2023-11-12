@@ -14,13 +14,14 @@ if [ ! -f "$subnet_file" ]; then
     exit 1
 fi
 
-# Variables:
-#
+#------------------------------------------
+# Variables
 # Create a timestamp for unique output files
 timestamp=$(date +%Y%m%d%H%M%S)
 
 # Name of outputfile containing all up hosts
 targets="targets.txt"
+#------------------------------------------
 
 echo "[+] Performing the 1st nmap scan on each subnet..."
 echo ""
