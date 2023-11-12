@@ -7,7 +7,7 @@ This script helps me during the early stages of a pentest.
 At the moment it does the following:
 
 1. Do a fast nmap scan over all provided ("in-scope") subnets.
-2. Get all hosts that are up and to a full scan (only top 2000 ports).
+2. Get all hosts that are up and do a full scan (only top 2000 ports).
 3. Use the nmap XML output to feed "eyewitness" to screenshot most HTTP Services to get a lay of the land.
 
 # That's all?

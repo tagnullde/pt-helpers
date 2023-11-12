@@ -1,6 +1,9 @@
 # Get all subnets from sites and services. Perfect for the nmap script.
 nxc ldap <ip> -u <user> -p <pass> -M subnets | grep Subnet: | cut -d '(' -f 2 | cut -d ')' -f 1 | cut -d ':' -f 2
 
+# Password Policy
+nxc smb <ip> -u <user> -p <pass> --pass-pol
+
 # get bloodhound data (set domain and dc in hostfile first)
 nxc ldap <ip> -u <user> -p <pass> --bloodhound -ns <ns-ip> --collection All
 
