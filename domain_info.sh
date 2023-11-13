@@ -61,6 +61,11 @@ nxc smb $dc -u $user -p $passwd -M nopac | grep "VULNERABLE" >> ad-vulns.txt
 echo "[+] Done: user-descriptions.txt"
 echo -e "[+] Done: ad-vulns.txt \n"
 
+# get ADCS
+echo "[!] Searching for Certificate Authority"
+nxc ldap $dc -u $user -p $passwd -M adcs | grep -v -e "[*]" -e "[+]" -e "[-]" | cut -d" " -f 53 > adcs.txt
+echo -e "[+] Done: adcs.txt \n"
+
 # get shares
 echo "[!] Getting Shares."
 for net in "${nets[@]}"; do

@@ -29,6 +29,7 @@ The script does:
 - Create Bloodhound.zip
 - Grab User-Descriptions
 - Find common vulns: PetitPotam, ZeroLogon, NoPac
+- Find ADCS (PetitPotam <3)
 - List all shares the user has access to
 - Get gpp_autologin (soon)
 - Get gpp_password (soon)
