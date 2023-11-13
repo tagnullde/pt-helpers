@@ -1,3 +1,6 @@
+# Find domain controller name
+nmap -p 389 -sV 192.168.100.0/24 | grep Host: | cut -d " " -f 4 | sed 's/.$//'
+
 # Get all subnets from sites and services. Perfect for the nmap script.
 nxc ldap <ip> -u <user> -p <pass> -M subnets | grep Subnet: | cut -d '(' -f 2 | cut -d ')' -f 1 | cut -d ':' -f 2
 
