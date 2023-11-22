@@ -9,6 +9,9 @@ sudo hashcat --username -a 0 -m 1000 hashes /usr/share/wordlists/rockyou.txt -r 
 sudo hashcat --username -a 0 -m 1000 hashes --show
 sudo hashcat --username -a 0 -m 1000 hashes --show | sed "s/^/DOMAIN.TLD\\\\/" > crackhound_input.txt
 
+# Crack straight from nxc 
+hashcat -m 1000 -w 3 -O -d 1,2 -a 0 -p : --session=all --username -o cracked.out --outfile-format=3 ../file.ntds rockyou.txt -r OneRuleToRuleThemStill.rule --potfile-path hashcat.pot
+
 # Add shit to Bloodhound
 crackhound.py -f crackhound_input.txt -u neo4j -p toor -plaintext -addpw
 
