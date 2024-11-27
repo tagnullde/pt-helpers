@@ -1,24 +1,20 @@
 # Whats this?
 
-This should become a collection of small scripts and notes to help me during the early stages of a pentest.
+This is a collection of small scripts and notes to help me during the early stages of a pentest.
 
-```
-./initial_scan.sh <subnet-file>
-```
+## Backup Script
+- Steals Desktop and Documents Folder of a User
+- Idea is to run this as a scheduled task in the permission context of the user
+- Saved the Data to a SMB Share
+- Could yield sensitive information like password-lists and at least a hash to crack.
 
-I assume the following setup:
+# LAPS-Script
+- If you have the permissions (or found a user with READLAPSPassword Permission) you can exfil LAPS passwords
+- Designed to run without AD-PowerShell Module
+- Writes Passwords to a SMB Share
 
-1. nmap is installed
-2. eyewitness is installed
-
-At the moment it does the following:
-
-- Do a fast nmap scan over all provided ("in-scope") subnets.
-- Get all hosts that are up and do a full scan (only top 2000 ports).
-- Use the nmap XML output to feed "eyewitness" to screenshot most HTTP Services to get a lay of the land.
-
-# Notes
-
-I removed the other script, because there's already a tool that does what I tried to do, but better.
-
-- [linWinPwn](https://github.com/lefayjey/linWinPwn)
+# Portscanner
+- Easy interface for scanning a network when nmap isn't available or to noisy
+- Can resolve DNS Names
+- Can Scan subnets
+- Can Scan multiple ports at once
