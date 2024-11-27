@@ -12,6 +12,8 @@ This is a collection of small scripts and notes to help me during the early stag
 - If you have the permissions (or found a user with READLAPSPassword Permission) you can exfil LAPS passwords
 - Designed to run without AD-PowerShell Module
 - Writes Passwords to a SMB Share
+- basic: testes
+- adv: untested as of yet
 
 ## Portscanner
 - Easy interface for scanning a network when nmap isn't available or to noisy
