@@ -1,6 +1,8 @@
-Put this at the end of the zshrc file. Then source it.
-This will add "startlog, stoplog, statuslog" aliases and it will log
-what you are doing during a pentest.
+###########################################################################
+# Put this at the end of the zshrc file. Then source it.                  #
+# This will add "startlog, stoplog, statuslog" aliases and it will log    #
+# what you are doing during a pentest.                                    #
+###########################################################################
 
 ```
 # Directory to store logfiles
