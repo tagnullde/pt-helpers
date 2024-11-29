@@ -1,0 +1,83 @@
+Put this at the end of the zshrc file. Then source it.
+This will add "startlog, stoplog, statuslog" aliases and it will log
+what you are doing during a pentest.
+
+```
+# Directory to store logfiles
+LOG_DIR="$HOME/pentest-logs"
+LOGFILE=""
+
+# Commands to exclude from logging
+EXCLUDE_COMMANDS=(
+    "cd" "ls" "ps" "clear" "exit" "pwd" "history" 
+    "nano" "source" "cat" "vi" "vim" "apt" "pip" "pipx"
+    "alias" "unalias" "export" "unset" "env" "set" "printenv"
+    "kill" "jobs" "bg" "fg" "disown"
+    "touch" "rm" "mv" "cp" "mkdir" "rmdir" "ln"
+    "bash" "zsh" "sh" "logout" "ssh" "stty" "tty"
+    "less" "more" "head" "tail" "strings"
+    "ping" "traceroute" "curl" "wget" "nslookup" "dig" "host" "whois"
+    "yum" "dnf" "zypper" "brew" "npm" "yarn" "cargo"
+    "gcc" "g++" "make" "cmake" "gdb" "strace" "ltrace"
+    "git" "svn" "hg"
+    "startx" "xinit" "xdg-open"
+    "time" "date" "cal" "df" "du" "free" "uptime"
+)
+
+# Function to log commands
+log_command() {
+    # Skip logging if LOGFILE is not set
+    if [[ -z "$LOGFILE" ]]; then
+        return
+    fi
+
+    local cmd=$(fc -ln -1 | sed 's/^ *//')  # Get the last command
+    local actual_cmd=$cmd
+
+    # Strip 'sudo' if present
+    if [[ $cmd == sudo* ]]; then
+        actual_cmd=$(echo "$cmd" | sed 's/^sudo //')
+    fi
+
+    # Check if the command should be excluded
+    for exclude in "${EXCLUDE_COMMANDS[@]}"; do
+        if [[ $actual_cmd == "$exclude"* ]]; then
+            return  # Skip logging excluded commands
+        fi
+    done
+
+    # Log the command
+    echo "$(date '+%Y-%m-%d %H:%M') - $cmd" >> "$LOGFILE"
+}
+
+# Function to enable logging
+enable_logging() {
+    mkdir -p "$LOG_DIR"  # Ensure the log directory exists
+    LOGFILE="$LOG_DIR/pentest-$(date '+%Y-%m-%d_%H-%M-%S').log"
+    precmd_functions+=(log_command)  # Add log_command to precmd hooks
+    echo "Logging enabled. Logfile: $LOGFILE"
+}
+
+# Function to disable logging
+disable_logging() {
+    # Remove log_command from precmd_functions
+    precmd_functions=(${precmd_functions:#log_command})
+    LOGFILE=""
+    echo "Logging disabled."
+}
+
+# Function to check logging status
+check_logging_status() {
+    if [[ -n "$LOGFILE" ]]; then
+        echo "Logging is ENABLED. Current logfile: $LOGFILE"
+    else
+        echo "Logging is DISABLED."
+    fi
+}
+
+# Aliases for convenience
+alias startlog="enable_logging"
+alias stoplog="disable_logging"
+alias logstatus="check_logging_status"
+
+```
