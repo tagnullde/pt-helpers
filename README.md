@@ -20,3 +20,19 @@ This is a collection of small scripts and notes to help me during the early stag
 - Can resolve DNS Names
 - Can Scan subnets
 - Can Scan multiple ports at once
+
+## LNK Creator
+
+This script will create a folder on the current users Desktop called "LNKs".
+Within the folder three files will be created:
+
+1. !SMB-Auth.lnk 
+2. !HTTP-Auth.lnk 
+3. !WebDAV.searchConnector-ms
+
+These files will enable at least the following attacks:
+
+1. NTLM Relay via SMB
+2. NTLM Relay via HTTP
+3. Capture Hashes for offline cracking
+4. Enables "WebDAV" on clients which have the WebDAV service installed but not already running
