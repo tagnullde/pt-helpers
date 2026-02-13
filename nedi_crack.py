@@ -3,27 +3,23 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from functools import lru_cache
+from itertools import cycle
 
 DEFAULT_KEY = "change for more security"
 
-
 # ---------- ANSI helpers (auto-disable if not a TTY) ----------
+@lru_cache(maxsize=1)
 def _use_color() -> bool:
     return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
 def _c(code: str, s: str) -> str:
-    if not _use_color():
-        return s
-    return f"\x1b[{code}m{s}\x1b[0m"
+    return f"\x1b[{code}m{s}\x1b[0m" if _use_color() else s
 
 
 def info(s: str) -> str:
     return _c("92", f"[+] {s}")  # green
-
-
-def warn(s: str) -> str:
-    return _c("93", f"[!] {s}")  # yellow
 
 
 def err(s: str) -> str:
@@ -39,39 +35,36 @@ def xorpass(data: bytes, key: bytes) -> bytes:
     if not key:
         raise ValueError("key must be non-empty")
 
-    k = bytearray(key)
+    k = key[::-1]
+    klen = len(k)
+
     out = bytearray(len(data))
-
-    for idx, b in enumerate(data):
-        i = k.pop()
-        out[idx] = b ^ i
-        k.insert(0, i)
-
+    for i, b in enumerate(data):
+        out[i] = b ^ k[i % klen]
     return bytes(out)
 
 
+def _b_latin1(s: str) -> bytes:
+    return s.encode("latin1", errors="strict")
+
+
 def encode_hex(plaintext: str, key: str) -> str:
-    pt = plaintext.encode("latin1", errors="strict")
-    ct = xorpass(pt, key.encode("latin1", errors="strict"))
-    return ct.hex()
+    return xorpass(_b_latin1(plaintext), _b_latin1(key)).hex()
 
 
 def decode_hex(ciphertext_hex: str, key: str) -> str:
-    ct = bytes.fromhex(ciphertext_hex)
-    pt = xorpass(ct, key.encode("latin1", errors="strict"))
-    return pt.decode("latin1", errors="strict")
+    return xorpass(bytes.fromhex(ciphertext_hex), _b_latin1(key)).decode("latin1", errors="strict")
 
 
 def recover_key_part(ciphertext_hex: str, plaintext: str) -> str:
     ct = bytes.fromhex(ciphertext_hex)
-    pt = plaintext.encode("latin1", errors="strict")
+    pt = _b_latin1(plaintext)
 
     if len(ct) != len(pt):
         raise ValueError("ciphertext and plaintext must have same length")
 
-    # keystream = c ^ p ; your xorpass uses key reversed => key_part = reverse(keystream)
-    keystream = bytes(c ^ p for c, p in zip(ct, pt))
-    key_part = keystream[::-1]
+    # keystream = c ^ p ; xorpass cycles reversed(key) => key_part = reverse(keystream)
+    key_part = bytes(c ^ p for c, p in zip(ct, pt))[::-1]
     return key_part.decode("latin1", errors="strict")
 
 
@@ -125,8 +118,20 @@ Examples:
         metavar=("CIPHERHEX", "PLAINTEXT"),
         help="Recover key-part: -r <cipherhex> <plaintext>  (outputs recovered key part for -k)",
     )
-
     return p
+
+
+def _split_optional_key(parts: list[str], *, join_rest: bool) -> tuple[str, str, bool]:
+    """
+    Returns: (key, text, used_default_key)
+    - If one arg: default key + that arg as text
+    - If >=2: first is key, rest is text (optionally joined)
+    """
+    if len(parts) == 1:
+        return DEFAULT_KEY, parts[0], True
+    if join_rest:
+        return parts[0], " ".join(parts[1:]), False
+    return parts[0], parts[1], False
 
 
 def main() -> int:
@@ -134,28 +139,16 @@ def main() -> int:
 
     try:
         if args.encode is not None:
-            if len(args.encode) == 1:
-                key = DEFAULT_KEY
-                plaintext = args.encode[0]
-                print(info(f"Mode     : encode (default key)"))
-            else:
-                key, plaintext = args.encode[0], " ".join(args.encode[1:])
-                print(info(f"Mode     : encode (custom key)"))
-
+            key, plaintext, used_default = _split_optional_key(args.encode, join_rest=True)
+            print(info(f"Mode     : encode ({'default' if used_default else 'custom'} key)"))
             out = encode_hex(plaintext, key)
             print(info(f"Plaintext: {bold(plaintext)}"))
             print(info(f"Cipher   : {bold(out)}"))
             return 0
 
         if args.decode is not None:
-            if len(args.decode) == 1:
-                key = DEFAULT_KEY
-                cipherhex = args.decode[0]
-                print(info(f"Mode     : decode (default key)"))
-            else:
-                key, cipherhex = args.decode[0], args.decode[1]
-                print(info(f"Mode     : decode (custom key)"))
-
+            key, cipherhex, used_default = _split_optional_key(args.decode, join_rest=False)
+            print(info(f"Mode     : decode ({'default' if used_default else 'custom'} key)"))
             pt = decode_hex(cipherhex, key)
             print(info(f"Cipher   : {bold(cipherhex)}"))
             print(info(f"Plaintext: {bold(pt)}"))
