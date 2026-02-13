@@ -36,3 +36,7 @@ These files will enable at least the following attacks:
 2. NTLM Relay via HTTP
 3. Capture Hashes for offline cracking
 4. Enables "WebDAV" on clients which have the WebDAV service installed but not already running
+
+## NeDi-Crack
+
+A script to "crack" passwords from a NeDi servers `nedi.conf` file.
