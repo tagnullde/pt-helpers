@@ -175,7 +175,7 @@ Examples (consistent order: data first, optional key last):
 """
 
     p = ColoredHelpArgumentParser(
-        description="NeDi Decoder by x41",
+        description="NeDi Password Decoder by x41",
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
