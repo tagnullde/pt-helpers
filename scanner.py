@@ -2,7 +2,7 @@
 # NOT SAFE FOR WORK YET!
 # ----------------------------------------------------------------------------- #
 #                    scanner.py — masscan + parse + confirm + nmap + eyewitness #
-#                         by x41 and the praktikant  (v1.4)                     #
+#                         by x41 and the praktikant  (v1.6)                     #
 # ----------------------------------------------------------------------------- #
 # Stages:
 #   1. masscan     — full port discovery (1-65535)
@@ -10,7 +10,11 @@
 #   3. confirm     — parallel nmap TCP connect, filters SYN proxy false positives
 #   4. deep        — nmap -sT -sV -sC -O per confirmed host on confirmed ports
 #                    produces per-host XMLs + merged nmap_combined.xml
-#   5. eyewitness  — screenshots web + RDP from combined XML (optional)
+#   5. eyewitness  — URL list built from confirmed_map + nmap service labels
+#                    nmap label used where available (http/https scheme hint)
+#                    unlabeled ports probed as both http+https — no hardcoded
+#                    port lists, works across any customer environment
+#                    only skip: Windows ephemeral RPC (>=49152, never HTTP)
 #
 # Usage:
 #   sudo python3 scanner.py --profile <safe|normal|fast|lab> <TARGET>
@@ -46,8 +50,8 @@ PROFILES = {
         "desc":            "healthcare / critical infra",
         "confirm_workers": 10,
         "confirm_timeout": 5,
-        "nmap_workers":    3,     # low — -sV/-sC traffic adds up fast on fragile nets
-        "nmap_timeout":    300,   # 5 min per host — embedded devices can be slow
+        "nmap_workers":    3,
+        "nmap_timeout":    300,
     },
     "normal": {
         "rate":            50_000,
@@ -58,7 +62,7 @@ PROFILES = {
         "confirm_workers": 25,
         "confirm_timeout": 2,
         "nmap_workers":    10,
-        "nmap_timeout":    120,   # 2 min per host
+        "nmap_timeout":    120,
     },
     "fast": {
         "rate":            100_000,
@@ -84,9 +88,119 @@ PROFILES = {
     },
 }
 
-# Preferred ports for confirmation probe — first match wins.
-# Falls back to lowest port found for that host.
 PROBE_PREFER = [22, 445, 80, 443, 389, 3389, 21, 25, 8080, 8443, 8888, 9090, 9443, 5986]
+
+# ----------------------------------------------------------------------------- #
+# EyeWitness URL generation
+# ----------------------------------------------------------------------------- #
+
+# Only skip Windows ephemeral RPC ports unconditionally — these are
+# structurally never HTTP and would just bloat the URL list with noise.
+# Everything else gets attempted: EyeWitness errors on non-HTTP ports
+# are cheap and silent. Hardcoded per-service port lists are avoided
+# because they are customer-specific and break on different environments.
+EPHEMERAL_RPC_START = 49152
+
+
+def _parse_nmap_service_labels(combined_xml: Path) -> dict[tuple[str, int], str]:
+    """
+    Parse nmap combined XML and return {(ip, port): scheme} for ports
+    nmap positively identified as http or https.
+    Only used as a hint — confirmed_map remains the authoritative port source.
+    """
+    labels: dict[tuple[str, int], str] = {}
+
+    if not combined_xml or not combined_xml.exists():
+        return labels
+
+    try:
+        tree = ET.parse(combined_xml)
+        root = tree.getroot()
+    except ET.ParseError:
+        return labels
+
+    for host in root.findall("host"):
+        addr_el = host.find("address[@addrtype='ipv4']")
+        if addr_el is None:
+            continue
+        ip = addr_el.get("addr", "")
+        if not ip:
+            continue
+
+        for port_el in host.findall(".//port[@protocol='tcp']"):
+            state_el = host.find(f".//port[@portid='{port_el.get('portid')}']//state[@state='open']")
+            service_el = port_el.find("service")
+            if service_el is None:
+                continue
+
+            portid = port_el.get("portid", "")
+            if not portid.isdigit():
+                continue
+
+            svc_name = service_el.get("name", "").lower()
+            tunnel   = service_el.get("tunnel", "").lower()
+
+            # nmap uses tunnel="ssl" for HTTPS on non-standard ports
+            if tunnel == "ssl" or svc_name in ("https", "ssl"):
+                labels[(ip, int(portid))] = "https"
+            elif svc_name == "http":
+                labels[(ip, int(portid))] = "http"
+
+    return labels
+
+
+def build_eyewitness_urls(
+    confirmed_map: dict[str, set[int]],
+    combined_xml:  Path | None = None,
+) -> list[str]:
+    """
+    Build URL list for EyeWitness from confirmed_map.
+
+    Strategy (in priority order per port):
+      1. nmap labeled it http  -> http://ip:port only
+      2. nmap labeled it https -> https://ip:port only
+      3. Port >= 49152         -> skip (Windows ephemeral RPC, never HTTP)
+      4. Everything else       -> try both http and https
+         EyeWitness errors on non-HTTP ports are harmless.
+         This ensures we never miss a web service because it's on an
+         unusual port — regardless of customer environment.
+    """
+    nmap_labels = _parse_nmap_service_labels(combined_xml) if combined_xml else {}
+    urls: list[str] = []
+    seen: set[str]  = set()
+
+    def add(url: str) -> None:
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    def fmt(scheme: str, ip: str, port: int) -> str:
+        if scheme == "http"  and port == 80:  return f"http://{ip}"
+        if scheme == "https" and port == 443: return f"https://{ip}"
+        return f"{scheme}://{ip}:{port}"
+
+    for ip in sorted(confirmed_map.keys(), key=lambda x: ip_address(x)):
+        for port in sorted(confirmed_map[ip]):
+
+            # Skip Windows ephemeral RPC range — structurally never HTTP
+            if port >= EPHEMERAL_RPC_START:
+                continue
+
+            label = nmap_labels.get((ip, port))
+
+            if label == "http":
+                add(fmt("http", ip, port))
+
+            elif label == "https":
+                add(fmt("https", ip, port))
+
+            else:
+                # nmap didn't label it, timed out, or we have no nmap data.
+                # Try both — cost is one extra failed connection if it's not HTTP.
+                add(fmt("http",  ip, port))
+                add(fmt("https", ip, port))
+
+    return urls
 
 
 # ----------------------------------------------------------------------------- #
@@ -163,19 +277,12 @@ def confirm_safe_profile() -> None:
     print()
 
 
-
 # ----------------------------------------------------------------------------- #
 # Dependency checks
 # ----------------------------------------------------------------------------- #
 def check_dependencies(skip_masscan: bool) -> dict[str, bool]:
-    """
-    Check required tools are installed. Warn and ask about optional tools.
-    Returns dict of {tool: available} for optional tools.
-    Exits immediately if a required tool is missing.
-    """
     print("[*] Checking dependencies")
 
-    # Required tools — missing = hard exit
     required = ["nmap"]
     if not skip_masscan:
         required.append("masscan")
@@ -188,7 +295,6 @@ def check_dependencies(skip_masscan: bool) -> dict[str, bool]:
             print(f"[!] {tool} is required but not installed. Aborting.")
             sys.exit(1)
 
-    # Optional tools — missing = warn + ask
     optional = {"eyewitness": False}
     for tool in optional:
         found = subprocess.run(["which", tool], capture_output=True).returncode == 0
@@ -210,12 +316,12 @@ def check_dependencies(skip_masscan: bool) -> dict[str, bool]:
 # Stage 1: masscan
 # ----------------------------------------------------------------------------- #
 def run_masscan(
-    profile: dict,
-    target: str,
-    il_file: str,
+    profile:    dict,
+    target:     str,
+    il_file:    str,
     port_range: str,
-    exclude: str,
-    outfile: Path,
+    exclude:    str,
+    outfile:    Path,
 ) -> None:
     cmd = [
         "masscan",
@@ -250,10 +356,6 @@ def run_masscan(
 # Stage 2: parse masscan XML
 # ----------------------------------------------------------------------------- #
 def parse_masscan_xml(path: Path) -> dict[str, set[int]]:
-    """
-    Parse masscan XML into {ip: set(ports)}.
-    masscan emits one <host> block per open port — merge all blocks per IP.
-    """
     try:
         tree = ET.parse(path)
     except ET.ParseError as e:
@@ -343,7 +445,6 @@ def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> None:
 # Stage 3: parallel nmap TCP connect confirmation
 # ----------------------------------------------------------------------------- #
 def parse_nmap_open_ports(xml_output: str) -> set[int]:
-    """Parse nmap XML stdout and return set of confirmed open ports."""
     confirmed = set()
     try:
         root = ET.fromstring(xml_output)
@@ -359,14 +460,10 @@ def parse_nmap_open_ports(xml_output: str) -> set[int]:
 
 
 def confirm_single_host(
-    ip: str,
-    ports: set[int],
+    ip:      str,
+    ports:   set[int],
     timeout: int,
 ) -> tuple[str, set[int]]:
-    """
-    Run nmap -sT -Pn -n on one host against its masscan-reported ports.
-    Returns (ip, confirmed_ports) — empty set if host is dead/proxy.
-    """
     ports_arg = ",".join(str(p) for p in sorted(ports))
     cmd = [
         "nmap",
@@ -395,18 +492,14 @@ def confirm_single_host(
 def confirm_hosts(
     portmap: dict[str, set[int]],
     profile: dict,
-    outdir: Path,
+    outdir:  Path,
 ) -> dict[str, set[int]]:
-    """
-    Confirm all hosts in parallel using profile workers/timeout.
-    Drops hosts where zero ports confirm (SYN proxy / not alive).
-    """
     sorted_hosts     = sort_ips(list(portmap.keys()))
     total            = len(sorted_hosts)
     workers          = profile["confirm_workers"]
     timeout          = profile["confirm_timeout"]
-    confirmed_map: dict[str, set[int]] = {}
-    dropped: list[str] = []
+    confirmed_map:   dict[str, set[int]] = {}
+    dropped:         list[str] = []
 
     counter      = {"n": 0}
     counter_lock = Lock()
@@ -495,10 +588,6 @@ def confirm_hosts(
 # Stage 4: nmap deep dive
 # ----------------------------------------------------------------------------- #
 def _merge_nmap_xmls(xml_paths: list[Path], out_path: Path) -> None:
-    """
-    Merge per-host nmap XML files into a single combined XML.
-    Extracts <host> blocks from each file, wraps in one <nmaprun>.
-    """
     if not xml_paths:
         return
 
@@ -531,15 +620,9 @@ def _merge_nmap_xmls(xml_paths: list[Path], out_path: Path) -> None:
 
 def run_nmap_deep_dive(
     confirmed_map: dict[str, set[int]],
-    profile: dict,
-    outdir: Path,
+    profile:       dict,
+    outdir:        Path,
 ) -> Path:
-    """
-    Per-host nmap -sT -sV -sC -O --system-dns on confirmed ports only.
-    Parallel with profile-defined worker count — limited vs confirmation
-    stage because -sV/-sC generates significantly more traffic per host.
-    Produces per-host XMLs in nmap/ subdir + merged nmap_combined.xml.
-    """
     sorted_hosts = sort_ips(list(confirmed_map.keys()))
     total        = len(sorted_hosts)
     workers      = profile["nmap_workers"]
@@ -620,33 +703,50 @@ def run_nmap_deep_dive(
     return combined_xml
 
 
-
 # ----------------------------------------------------------------------------- #
 # Stage 5: EyeWitness
 # ----------------------------------------------------------------------------- #
-def run_eyewitness(combined_xml: Path, outdir: Path) -> None:
+def run_eyewitness(
+    confirmed_map: dict[str, set[int]],
+    outdir:        Path,
+    combined_xml:  Path | None = None,
+) -> None:
     """
-    Run EyeWitness against the combined nmap XML.
-    Screenshots web (HTTP/HTTPS) and RDP services.
-    Output goes to <outdir>/eyewitness/ — directory is created fresh each run.
-    """
-    ew_dir = outdir / "eyewitness"
+    Build URL list from confirmed_map + nmap service labels, then run
+    EyeWitness via -f.
 
-    # EyeWitness will refuse to run if the directory already exists
-    # (e.g. from a --from-xml re-run). Remove it first.
+    Priority:
+      1. nmap labeled port as http/https -> use that scheme only
+      2. port >= 49152 (Windows RPC)    -> skip
+      3. everything else                -> try both http and https
+
+    This avoids both hardcoded port lists (customer-specific) and sole
+    reliance on nmap labels (misses timed-out or mislabeled services).
+    """
+    urls     = build_eyewitness_urls(confirmed_map, combined_xml)
+    urls_out = outdir / "eyewitness_urls.txt"
+
+    with open(urls_out, "w") as f:
+        for url in urls:
+            f.write(url + "\n")
+
+    print(f"[*] Stage 5: EyeWitness")
+    print(f"  URL list   : {urls_out}  ({len(urls)} targets)")
+    print()
+
+    ew_dir = outdir / "eyewitness"
     if ew_dir.exists():
         import shutil
         shutil.rmtree(ew_dir)
 
     cmd = [
         "eyewitness",
-        "-x", str(combined_xml),
+        "-f", str(urls_out),
         "--web",
         "--no-prompt",
         "-d", str(ew_dir),
     ]
 
-    print("[*] Stage 5: EyeWitness")
     print(f"[*] Running: {' '.join(cmd)}")
     print()
 
@@ -680,11 +780,11 @@ def parse_args() -> argparse.Namespace:
             "lab    — 500k pps ~160 Mbit/s  your lab only"
         ),
     )
-    parser.add_argument("target",     nargs="?", default=None,       help="Target IP, range or CIDR")
-    parser.add_argument("--iL",       dest="il_file", default=None,  help="Input file of targets")
-    parser.add_argument("--ports",    default="1-65535",              help="Port range (default: 1-65535)")
-    parser.add_argument("--exclude",  default="",                     help="Exclude CIDR or file of ranges")
-    parser.add_argument("--outdir",   default=None,                   help="Output directory")
+    parser.add_argument("target",     nargs="?", default=None,      help="Target IP, range or CIDR")
+    parser.add_argument("--iL",       dest="il_file", default=None, help="Input file of targets")
+    parser.add_argument("--ports",    default="1-65535",             help="Port range (default: 1-65535)")
+    parser.add_argument("--exclude",  default="",                    help="Exclude CIDR or file of ranges")
+    parser.add_argument("--outdir",   default=None,                  help="Output directory")
     parser.add_argument(
         "--from-xml",
         default=None,
@@ -702,14 +802,12 @@ def main() -> None:
     args    = parse_args()
     profile = PROFILES[args.profile]
 
-    # Dependency checks — upfront before any work starts
-    optional = check_dependencies(skip_masscan=args.from_xml is not None)
+    optional             = check_dependencies(skip_masscan=args.from_xml is not None)
     run_eyewitness_stage = optional.get("eyewitness", False)
 
     print(f"[*] Working directory : {Path.cwd()}")
     print()
 
-    # --from-xml: skip masscan
     if args.from_xml:
         if not os.path.isfile(args.from_xml):
             print(f"[!] XML file not found: {args.from_xml}")
@@ -766,7 +864,6 @@ def main() -> None:
         if profile["confirm"]:
             confirm_safe_profile()
 
-        # Stage 1
         print("[*] Stage 1: masscan")
         print()
         run_masscan(
@@ -805,12 +902,18 @@ def main() -> None:
 
     # Stage 5
     if run_eyewitness_stage:
-        run_eyewitness(combined_xml, outdir)
+        run_eyewitness(confirmed_map, outdir, combined_xml)
     else:
-        print("[*] Skipping stage 5: eyewitness not available")
+        # Still write the URL list — useful for manual runs
+        urls     = build_eyewitness_urls(confirmed_map, combined_xml)
+        urls_out = outdir / "eyewitness_urls.txt"
+        with open(urls_out, "w") as f:
+            for url in urls:
+                f.write(url + "\n")
+        print(f"[*] EyeWitness not available — URL list written to {urls_out}")
+        print(f"    Run manually: eyewitness -f {urls_out} --web --no-prompt -d {outdir}/eyewitness")
         print()
 
-    # Hand ownership back to the calling user so files are accessible without sudo
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         subprocess.run(["chown", "-R", f"{sudo_user}:{sudo_user}", str(outdir)],
