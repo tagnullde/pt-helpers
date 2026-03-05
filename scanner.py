@@ -2,7 +2,7 @@
 # NOT SAFE FOR WORK YET!
 # ----------------------------------------------------------------------------- #
 #                    scanner.py — masscan + parse + confirm + nmap + eyewitness #
-#                         by x41 and the praktikant  (v1.7)                     #
+#                         by x41 and the praktikant  (v1.8)                     #
 # ----------------------------------------------------------------------------- #
 # Stages:
 #   1. masscan     — full port discovery (1-65535)
@@ -12,7 +12,7 @@
 #                    produces per-host XMLs + merged nmap_combined.xml
 #   5. eyewitness  — screenshots web services from combined nmap XML (-x)
 #                    correct service labels guaranteed by scaled timeouts
-#                    (calc_timeout ensures nmap finishes before eyewitness runs)
+#                    flat timeout per profile ensures nmap finishes cleanly
 #
 # Usage:
 #   sudo python3 scanner.py --profile <safe|normal|fast|lab> <TARGET>
@@ -49,7 +49,7 @@ PROFILES = {
         "confirm_workers": 10,
         "confirm_timeout": 5,
         "nmap_workers":    3,
-        "nmap_timeout":    300,
+        "nmap_timeout":    300,  # flat — iLO/embedded devices slow regardless of port count
     },
     "normal": {
         "rate":            50_000,
@@ -60,7 +60,7 @@ PROFILES = {
         "confirm_workers": 25,
         "confirm_timeout": 2,
         "nmap_workers":    20,
-        "nmap_timeout":    120,
+        "nmap_timeout":    400,  # flat — 2x real-world max observed (182s)
     },
     "fast": {
         "rate":            100_000,
@@ -71,7 +71,7 @@ PROFILES = {
         "confirm_workers": 50,
         "confirm_timeout": 2,
         "nmap_workers":    30,
-        "nmap_timeout":    90,
+        "nmap_timeout":    400,
     },
     "lab": {
         "rate":            500_000,
@@ -82,7 +82,7 @@ PROFILES = {
         "confirm_workers": 100,
         "confirm_timeout": 1,
         "nmap_workers":    30,
-        "nmap_timeout":    60,
+        "nmap_timeout":    400,
     },
 }
 
@@ -504,24 +504,6 @@ def _merge_nmap_xmls(xml_paths: list[Path], out_path: Path) -> None:
         f.write("</nmaprun>\n")
 
 
-def calc_timeout(port_count: int, base: int) -> int:
-    """
-    Scale nmap host-timeout with the number of ports being scanned.
-    -sV/-sC/-O on many ports takes significantly longer than on a few —
-    a flat timeout causes false timeouts on hosts like Veeam, Exchange,
-    or anything with 20+ open ports and slow service responses.
-
-    Formula: base + (port_count * 3 seconds), capped at 20 minutes.
-    Examples at base=120:
-      3  ports ->  129s  (~2 min)
-      10 ports ->  150s  (~2.5 min)
-      20 ports ->  180s  (~3 min)
-      32 ports ->  216s  (~3.5 min)  — Veeam case
-      50 ports ->  270s  (~4.5 min)
-    """
-    return min(base + (port_count * 3), 1200)
-
-
 def run_nmap_deep_dive(
     confirmed_map: dict[str, set[int]],
     profile:       dict,
@@ -530,13 +512,13 @@ def run_nmap_deep_dive(
     sorted_hosts = sort_ips(list(confirmed_map.keys()))
     total        = len(sorted_hosts)
     workers      = profile["nmap_workers"]
-    base_timeout = profile["nmap_timeout"]
+    timeout      = profile["nmap_timeout"]
 
     nmap_dir = outdir / "nmap"
     nmap_dir.mkdir(exist_ok=True)
 
     print(f"[*] Stage 4: nmap deep dive — {total} hosts  "
-          f"(workers: {workers}, base timeout: {base_timeout}s + 3s/port, cap: 1200s)")
+          f"(workers: {workers}, timeout: {timeout}s per host)")
     print()
 
     counter      = {"n": 0}
@@ -546,7 +528,6 @@ def run_nmap_deep_dive(
     def scan_host(ip: str) -> tuple[str, Path | None]:
         ports     = confirmed_map[ip]
         ports_arg = ",".join(str(p) for p in sorted(ports))
-        timeout   = calc_timeout(len(ports), base_timeout)
         safe_ip   = ip.replace(".", "_")
         xml_path  = nmap_dir / f"{safe_ip}.xml"
 
@@ -570,7 +551,7 @@ def run_nmap_deep_dive(
             n = counter["n"]
 
         with print_lock:
-            print(f"  [{n}/{total}] {ip:<20} ports: {len(ports):<4} timeout: {timeout}s")
+            print(f"  [{n}/{total}] {ip:<20} ports: {len(ports)}")
 
         try:
             subprocess.run(cmd, capture_output=True, timeout=timeout + 30)
@@ -614,8 +595,8 @@ def run_nmap_deep_dive(
 def run_eyewitness(combined_xml: Path, outdir: Path) -> None:
     """
     Run EyeWitness against the merged nmap XML using -x.
-    Correct service labels are guaranteed because calc_timeout ensures
-    nmap finishes cleanly before this stage runs.
+    Correct service labels are guaranteed because the flat per-profile
+    timeout gives nmap sufficient time to finish cleanly.
     """
     ew_dir = outdir / "eyewitness"
     if ew_dir.exists():
