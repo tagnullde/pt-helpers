@@ -618,6 +618,24 @@ def _merge_nmap_xmls(xml_paths: list[Path], out_path: Path) -> None:
         f.write("</nmaprun>\n")
 
 
+def calc_timeout(port_count: int, base: int) -> int:
+    """
+    Scale nmap host-timeout with the number of ports being scanned.
+    -sV/-sC/-O on many ports takes significantly longer than on a few —
+    a flat timeout causes false timeouts on hosts like Veeam, Exchange,
+    or anything with 20+ open ports and slow service responses.
+
+    Formula: base + (port_count * 3 seconds), capped at 20 minutes.
+    Examples at base=120:
+      3  ports ->  129s  (~2 min)
+      10 ports ->  150s  (~2.5 min)
+      20 ports ->  180s  (~3 min)
+      32 ports ->  216s  (~3.5 min)  — Veeam case
+      50 ports ->  270s  (~4.5 min)
+    """
+    return min(base + (port_count * 3), 1200)
+
+
 def run_nmap_deep_dive(
     confirmed_map: dict[str, set[int]],
     profile:       dict,
@@ -626,13 +644,13 @@ def run_nmap_deep_dive(
     sorted_hosts = sort_ips(list(confirmed_map.keys()))
     total        = len(sorted_hosts)
     workers      = profile["nmap_workers"]
-    timeout      = profile["nmap_timeout"]
+    base_timeout = profile["nmap_timeout"]
 
     nmap_dir = outdir / "nmap"
     nmap_dir.mkdir(exist_ok=True)
 
     print(f"[*] Stage 4: nmap deep dive — {total} hosts  "
-          f"(workers: {workers}, timeout: {timeout}s per host)")
+          f"(workers: {workers}, base timeout: {base_timeout}s + 3s/port, cap: 1200s)")
     print()
 
     counter      = {"n": 0}
@@ -640,7 +658,9 @@ def run_nmap_deep_dive(
     print_lock   = Lock()
 
     def scan_host(ip: str) -> tuple[str, Path | None]:
-        ports_arg = ",".join(str(p) for p in sorted(confirmed_map[ip]))
+        ports     = confirmed_map[ip]
+        ports_arg = ",".join(str(p) for p in sorted(ports))
+        timeout   = calc_timeout(len(ports), base_timeout)
         safe_ip   = ip.replace(".", "_")
         xml_path  = nmap_dir / f"{safe_ip}.xml"
 
@@ -665,7 +685,7 @@ def run_nmap_deep_dive(
             n = counter["n"]
 
         with print_lock:
-            print(f"  [{n}/{total}] {ip:<20} ports: {ports_arg}")
+            print(f"  [{n}/{total}] {ip:<20} ports: {len(ports):<4} timeout: {timeout}s")
 
         try:
             subprocess.run(cmd, capture_output=True, timeout=timeout + 30)
