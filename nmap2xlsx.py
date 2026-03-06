@@ -2,24 +2,23 @@
 # NOT SAFE FOR WORK YET!
 # ----------------------------------------------------------------------------- #
 #                    scanner.py — masscan + parse + confirm + nmap + eyewitness #
-#                         by x41 and the praktikant  (v3.3)                     #
+#                         by x41 and the praktikant  (v4.4)                     #
 # ----------------------------------------------------------------------------- #
 # Stages:
 #   1. masscan     — full port discovery (1-65535)
 #   2. parse       — extract hosts/ports from masscan XML
-#   3. confirm     — parallel nmap TCP connect, filters SYN proxy false positives
-#   4. deep        — nmap -sV -sC -O per confirmed host on confirmed ports
+#   3. confirm     — full TCP connect per port, filters proxied/dead ports
+#                    only confirmed-open ports proceed to nmap
+#   4. nmap        — -sV -sC -O per host on confirmed ports only
 #                    produces per-host XMLs + merged nmap_combined.xml
 #   5. xlsx        — nmap_results.xlsx from combined XML (openpyxl)
-#   6. eyewitness  — screenshots web services from combined nmap XML (-x)
-#                    flat timeout per profile (safe=300s, others=400s)
+#   6. eyewitness  — screenshots of web services (optional, if installed)
 #
 # Usage:
-#   sudo python3 scanner.py --profile <safe|normal|fast|lab> <TARGET>
-#   sudo python3 scanner.py --profile <safe|normal|fast|lab> --iL <FILE>
-#
-# Skip masscan, reuse existing XML (for testing/dev):
-#   sudo python3 scanner.py --profile normal --from-xml <masscan.xml>
+#   sudo python3 scanner.py <TARGET>
+#   sudo python3 scanner.py --iL <FILE>
+#   sudo python3 scanner.py --from-masscan-xml <masscan.xml>
+#   sudo python3 scanner.py --from-nmap-xml <nmap_combined.xml>
 # ----------------------------------------------------------------------------- #
 
 import argparse
@@ -27,9 +26,11 @@ import csv
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
+import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44,59 +45,6 @@ try:
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
-
-# ----------------------------------------------------------------------------- #
-# Profiles
-# ----------------------------------------------------------------------------- #
-PROFILES = {
-    "safe": {
-        "rate":            10_000,
-        "retries":         0,
-        "confirm":         True,
-        "bw":              "~3.2 Mbit/s",
-        "desc":            "healthcare / critical infra",
-        "confirm_workers": 10,
-        "confirm_timeout": 5,
-        "nmap_workers":    3,
-        "nmap_timeout":    300,  # flat — iLO/embedded devices slow regardless of port count
-    },
-    "normal": {
-        "rate":            50_000,
-        "retries":         1,
-        "confirm":         False,
-        "bw":              "~16 Mbit/s",
-        "desc":            "standard corporate / SMB",
-        "confirm_workers": 25,
-        "confirm_timeout": 2,
-        "nmap_workers":    20,
-        "nmap_timeout":    400,  # flat — 2x real-world max observed (182s)
-    },
-    "fast": {
-        "rate":            100_000,
-        "retries":         1,
-        "confirm":         False,
-        "bw":              "~32 Mbit/s",
-        "desc":            "large orgs / pentest VLAN",
-        "confirm_workers": 50,
-        "confirm_timeout": 2,
-        "nmap_workers":    30,
-        "nmap_timeout":    400,
-    },
-    "lab": {
-        "rate":            500_000,
-        "retries":         2,
-        "confirm":         False,
-        "bw":              "~160 Mbit/s",
-        "desc":            "your lab only — never on customer networks",
-        "confirm_workers": 100,
-        "confirm_timeout": 1,
-        "nmap_workers":    30,
-        "nmap_timeout":    400,
-    },
-}
-
-PROBE_PREFER = [22, 445, 80, 443, 389, 3389, 21, 25, 8080, 8443, 8888, 9090, 9443, 5986]
-
 
 # ----------------------------------------------------------------------------- #
 # Spinner progress indicator
@@ -203,13 +151,6 @@ def format_time(seconds: int) -> str:
     return f"{s}s"
 
 
-def select_probe(ports: set[int]) -> int:
-    for p in PROBE_PREFER:
-        if p in ports:
-            return p
-    return min(ports)
-
-
 def validate_target(target: str) -> None:
     try:
         net = ip_network(target, strict=False)
@@ -224,20 +165,6 @@ def validate_target(target: str) -> None:
     except ValueError:
         print(f"[!] Invalid target: {target}")
         sys.exit(1)
-
-
-def confirm_safe_profile() -> None:
-    print("  ┌─────────────────────────────────────────────────────────┐")
-    print("  │  SAFE profile active. Before continuing confirm:        │")
-    print("  │  • Written authorization obtained for this target       │")
-    print("  │  • Fragile / medical devices identified and excluded    │")
-    print("  └─────────────────────────────────────────────────────────┘")
-    print()
-    answer = input("  Type yes to continue (y/n): ").strip().lower()
-    if answer not in ("y", "yes"):
-        print("[!] Aborted.")
-        sys.exit(1)
-    print()
 
 
 # ----------------------------------------------------------------------------- #
@@ -272,18 +199,17 @@ def check_dependencies(skip_masscan: bool, require_nmap: bool = True) -> dict[st
 # Stage 1: masscan
 # ----------------------------------------------------------------------------- #
 def run_masscan(
-    profile:    dict,
-    target:     str,
-    il_file:    str,
-    port_range: str,
-    exclude:    str,
-    outfile:    Path,
+    rate:    int,
+    target:  str,
+    il_file: str,
+    exclude: str,
+    outfile: Path,
 ) -> None:
     cmd = [
         "masscan",
-        "-p", port_range,
-        "--rate", str(profile["rate"]),
-        "--retries", str(profile["retries"]),
+        "-p", "1-65535",
+        "--rate", str(rate),
+        "--retries", "1",
         "--open-only",
         "-oX", str(outfile),
     ]
@@ -316,6 +242,9 @@ def run_masscan(
     def read_stderr():
         # Accumulate state from whatever masscan emits — different lines
         # carry different fields, so we build the label from running totals.
+        # masscan 1.3.2 status line format:
+        #   rate:  49.83-kpps, 2.95%
+        # may also emit: found: N; remaining: HH:MM:SS
         state = {"pct": "", "rate": "", "found": "0", "rem": ""}
         for line in proc.stderr:
             line = line.strip()
@@ -398,19 +327,15 @@ def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> Path:
     """Write masscan parse outputs. Returns portmap_path for summary use."""
     sorted_hosts = sort_ips(list(portmap.keys()))
     all_ports    = sorted(set(p for ports in portmap.values() for p in ports))
-    probes       = {ip: select_probe(portmap[ip]) for ip in sorted_hosts}
-
-    # Important output — confirmed ports map used by nmap stage
-    portmap_path = outdir / "masscan_ports_map.csv"
+    # Raw masscan parse output — one row per host with all discovered ports
+    debug_dir    = outdir / "debug"
+    debug_dir.mkdir(exist_ok=True)
+    portmap_path = debug_dir / "masscan_ports_map.csv"
     with open(portmap_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["host", "ports"])
         for ip in sorted_hosts:
             writer.writerow([ip, ",".join(str(p) for p in sorted(portmap[ip]))])
-
-    # Debug outputs — useful for troubleshooting, not needed day-to-day
-    debug_dir = outdir / "debug"
-    debug_dir.mkdir(exist_ok=True)
 
     with open(debug_dir / "masscan_alive_hosts.txt", "w") as f:
         for ip in sorted_hosts:
@@ -420,25 +345,17 @@ def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> Path:
         for port in all_ports:
             f.write(str(port) + "\n")
 
-    # Note: probe column is the "best" port per host for manual re-probing reference.
-    # The confirmation stage itself runs against all masscan ports, not just this one.
-    with open(debug_dir / "masscan_host_best_ports.txt", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["host", "best_port"])
-        for ip in sorted_hosts:
-            writer.writerow([ip, probes[ip]])
-
     lines = [
         "=== masscan parse summary ===",
         "",
         f"Alive hosts (masscan)  : {len(sorted_hosts)}",
         f"Unique ports           : {len(all_ports)}",
         "",
-        "--- Per-host breakdown (ports / probe) ---",
+        "--- Per-host breakdown ---",
     ]
     for ip in sorted_hosts:
         ports_str = ",".join(str(p) for p in sorted(portmap[ip]))
-        lines.append(f"  {ip:<20}  ports: {ports_str:<60}  probe: {probes[ip]}")
+        lines.append(f"  {ip:<20}  ports: {ports_str}")
 
     with open(debug_dir / "masscan_summary.txt", "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -508,19 +425,18 @@ def confirm_single_host(
 
 
 def confirm_hosts(
-    portmap: dict[str, set[int]],
-    profile: dict,
-    outdir:  Path,
-    debug:   bool = False,
+    portmap:  dict[str, set[int]],
+    workers:  int,
+    timeout:  int,
+    outdir:   Path,
+    debug:    bool = False,
 ) -> tuple[dict[str, set[int]], Path]:
-    sorted_hosts   = sort_ips(list(portmap.keys()))
-    total          = len(sorted_hosts)
-    workers        = profile["confirm_workers"]
-    timeout        = profile["confirm_timeout"]
+    sorted_hosts = sort_ips(list(portmap.keys()))
+    total        = len(sorted_hosts)
     confirmed_map: dict[str, set[int]] = {}
     dropped:       list[str] = []
 
-    sp = Spinner(total).start()
+    sp = Spinner(total).start() if not debug else None
 
     def task(ip: str) -> tuple[str, set[int]]:
         return confirm_single_host(ip, portmap[ip], timeout)
@@ -530,18 +446,17 @@ def confirm_hosts(
             futures = {executor.submit(task, ip): ip for ip in sorted_hosts}
             for future in as_completed(futures):
                 ip, confirmed_ports = future.result()
-                sp.update()
+                if sp is not None:
+                    sp.update()
                 if confirmed_ports:
                     confirmed_map[ip] = confirmed_ports
                     if debug:
                         conf_str = ",".join(str(p) for p in sorted(confirmed_ports))
-                        sp.stop(f"  {ip:<20} ✓  {conf_str}")
-                        sp = Spinner(total).start()
+                        print(f"  {ip:<20} ✓  {conf_str}")
                 else:
                     dropped.append(ip)
                     if debug:
-                        sp.stop(f"  {ip:<20} ✗  dropped")
-                        sp = Spinner(total).start()
+                        print(f"  {ip:<20} ✗  dropped")
     except KeyboardInterrupt:
         # kill any in-flight confirm nmap processes
         with _confirm_procs_lock:
@@ -550,23 +465,24 @@ def confirm_hosts(
                     proc.terminate()
                 except Exception:
                     pass
-        sp.stop()
+        if sp is not None:
+            sp.stop()
         raise
 
     confirmed_sorted    = sort_ips(list(confirmed_map.keys()))
     all_confirmed_ports = sorted(set(p for ports in confirmed_map.values() for p in ports))
 
-    # Always write confirmed ports map — important output used by nmap stage
-    confirmed_ports_path = outdir / "confirmed_ports_map.csv"
+    # Debug outputs
+    debug_dir = outdir / "debug"
+    debug_dir.mkdir(exist_ok=True)
+
+    # Write confirmed ports map to debug dir
+    confirmed_ports_path = debug_dir / "confirmed_ports_map.csv"
     with open(confirmed_ports_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["host", "ports"])
         for ip in confirmed_sorted:
             writer.writerow([ip, ",".join(str(p) for p in sorted(confirmed_map[ip]))])
-
-    # Debug outputs
-    debug_dir = outdir / "debug"
-    debug_dir.mkdir(exist_ok=True)
 
     with open(debug_dir / "confirmed_hosts.txt", "w") as f:
         for ip in confirmed_sorted:
@@ -592,7 +508,10 @@ def confirm_hosts(
     with open(debug_dir / "confirmed_summary.txt", "w") as f:
         f.write("\n".join(lines) + "\n")
 
-    sp.stop(f"  [+] confirmed: {len(confirmed_sorted)} alive, {len(dropped)} dropped")
+    if sp is not None:
+        sp.stop(f"  [+] confirmed: {len(confirmed_sorted)} alive, {len(dropped)} dropped")
+    else:
+        print(f"  [+] confirmed: {len(confirmed_sorted)} alive, {len(dropped)} dropped")
     return confirmed_map, confirmed_ports_path
 
 
@@ -601,6 +520,9 @@ def confirm_hosts(
 # ----------------------------------------------------------------------------- #
 def _merge_nmap_xmls(xml_paths: list[Path], out_path: Path) -> None:
     if not xml_paths:
+        # Write a minimal valid nmaprun so downstream stages have a parseable file
+        with open(out_path, "w") as f:
+            f.write('<?xml version="1.0"?>\n<nmaprun scanner="nmap" args="scanner.py combined" start="" version="" xmloutputversion="1.04">\n</nmaprun>\n')
         return
 
     host_blocks: list[str] = []
@@ -632,14 +554,13 @@ def _merge_nmap_xmls(xml_paths: list[Path], out_path: Path) -> None:
 
 def run_nmap_deep_dive(
     confirmed_map: dict[str, set[int]],
-    profile:       dict,
+    workers:       int,
+    timeout:       int,
     outdir:        Path,
     debug:         bool = False,
 ) -> tuple[Path, list[str]]:
     sorted_hosts = sort_ips(list(confirmed_map.keys()))
     total        = len(sorted_hosts)
-    workers      = profile["nmap_workers"]
-    timeout      = profile["nmap_timeout"]
 
     nmap_dir = outdir / "nmap"
     nmap_dir.mkdir(exist_ok=True)
@@ -719,7 +640,6 @@ def run_nmap_deep_dive(
                 except Exception:
                     pass
         # give them a moment, then force-kill any stragglers
-        import time
         time.sleep(0.5)
         with _procs_lock:
             for proc in _procs:
@@ -773,9 +693,9 @@ def run_nmap_deep_dive(
 def write_xlsx(combined_xml: Path, outdir: Path) -> Path | None:
     """
     Parse nmap combined XML and write nmap_results.xlsx.
-    Columns: IP | Hostname | MAC | Vendor | OS | Port | State | Service | Product | Version
-    One row per open port. Hosts with no open ports (timedout) are included
-    as a single row with port columns empty so they appear in the sheet.
+    Columns: IP | Hostname | MAC | Vendor | OS | Port | Protocol | State | Service | Product | Version | Extra Info
+    One row per port entry in the XML. Timed-out hosts are not included
+    as they do not appear in nmap_combined.xml (only successful scans are merged).
     """
     if not HAS_OPENPYXL:
         print("  [!] openpyxl not installed — skipping xlsx")
@@ -842,18 +762,7 @@ def write_xlsx(combined_xml: Path, outdir: Path) -> Path | None:
         os_name  = os_match.get("name", "") if os_match is not None else ""
 
         # ── ports ─────────────────────────────────────────────────────────────
-        ports = host.findall(".//port")
-        if not ports:
-            # Host present but no port data (timed out) — one row, ports blank
-            row_idx += 1
-            fill = FILL_ODD if row_idx % 2 else FILL_EVEN
-            row = [ip, hostname, mac, vendor, os_name, "", "", "", "", "", "", ""]
-            ws.append(row)
-            for cell in ws[ws.max_row]:
-                cell.fill = fill
-            continue
-
-        for port in ports:
+        for port in host.findall(".//port"):
             state_el   = port.find("state")
             service_el = port.find("service")
 
@@ -873,23 +782,17 @@ def write_xlsx(combined_xml: Path, outdir: Path) -> Path | None:
             for cell in ws[ws.max_row]:
                 cell.fill = fill
 
-    # ── column widths ─────────────────────────────────────────────────────────
-    col_widths = {
-        "A": 16,  # IP
-        "B": 28,  # Hostname
-        "C": 18,  # MAC
-        "D": 20,  # Vendor
-        "E": 35,  # OS
-        "F": 8,   # Port
-        "G": 9,   # Protocol
-        "H": 10,  # State
-        "I": 14,  # Service
-        "J": 22,  # Product
-        "K": 18,  # Version
-        "L": 28,  # Extra Info
-    }
-    for col, width in col_widths.items():
-        ws.column_dimensions[col].width = width
+    # ── column widths — dynamic based on content, capped to avoid absurd widths ─
+    MIN_WIDTH = 8
+    MAX_WIDTH = 60
+    PADDING   = 3
+    for col_cells in ws.columns:
+        max_len = max(
+            len(str(cell.value)) if cell.value is not None else 0
+            for cell in col_cells
+        )
+        width = min(MAX_WIDTH, max(MIN_WIDTH, max_len + PADDING))
+        ws.column_dimensions[col_cells[0].column_letter].width = width
 
     # ── auto-filter on header row ─────────────────────────────────────────────
     ws.auto_filter.ref = ws.dimensions
@@ -945,25 +848,22 @@ def parse_args() -> argparse.Namespace:
             "Stages:\n"
             "  1. masscan   full TCP port discovery (1-65535)\n"
             "  2. parse     extract hosts/ports from masscan XML\n"
-            "  3. confirm   parallel nmap connect, filters SYN proxy false positives\n"
+            "  3. confirm   full TCP connect per port, filters proxied/dead ports\n"
+            "               only confirmed-open ports proceed to nmap\n"
             "  4. nmap      -sV -sC -O per host on confirmed ports only\n"
-            "               timeout scales automatically with port count\n"
-            "  5. eyewitness screenshots web services (optional, if installed)\n"
+            "  5. xlsx      nmap_results.xlsx from combined XML\n"
+            "  6. eyewitness screenshots web services (optional, if installed)\n"
             "\n"
-            "Profiles:\n"
-            "  safe   —  10k pps  ~3.2 Mbit/s  healthcare / critical infra\n"
-            "             confirmation stage enabled, lowest worker counts\n"
-            "  normal —  50k pps  ~16  Mbit/s  standard corporate / SMB\n"
-            "  fast   — 100k pps  ~32  Mbit/s  large orgs / pentest VLAN\n"
-            "  lab    — 500k pps  ~160 Mbit/s  your lab only — never on customers\n"
+            "Defaults: --rate 50000  --workers 20  --timeout 400\n"
+            "          --confirm-workers 25  --confirm-timeout 2\n"
             "\n"
             "Examples:\n"
-            "  sudo python3 scanner.py --profile normal 192.168.1.0/24\n"
-            "  sudo python3 scanner.py --profile fast --iL targets.txt\n"
-            "  sudo python3 scanner.py --profile normal 10.0.0.0/8 --exclude 10.0.0.1\n"
-            "  sudo python3 scanner.py --profile normal 10.0.0.0/16 --workers 30\n"
-            "  sudo python3 scanner.py --profile safe --iL targets.txt --ports 80,443,8080-8090\n"
-            "  sudo python3 scanner.py --profile normal --from-xml masscan.xml --outdir results/\n  sudo python3 scanner.py --profile normal --from-nmap-xml nmap_combined.xml\n"
+            "  sudo python3 scanner.py 192.168.1.0/24\n"
+            "  sudo python3 scanner.py --iL targets.txt --rate 10000\n"
+            "  sudo python3 scanner.py 10.0.0.0/8 --exclude 10.0.0.1\n"
+            "  sudo python3 scanner.py 10.0.0.0/16 --workers 30\n"
+            "  sudo python3 scanner.py --from-masscan-xml masscan.xml --outdir results/\n"
+            "  sudo python3 scanner.py --from-nmap-xml nmap_combined.xml\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -975,31 +875,24 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         default=None,
         metavar="TARGET",
-        help="IP address, range or CIDR  (e.g. 192.168.1.0/24, 10.0.0.1-254)"
+        help="IP address or CIDR  (e.g. 192.168.1.0/24, 10.0.0.0/8)"
     )
     target_group.add_argument(
         "--iL",
         dest="il_file",
         default=None,
         metavar="FILE",
-        help="File containing one target per line (IPs, CIDRs, ranges)"
+        help="File containing one target per line (IPs, CIDRs)"
     )
 
     # Scan options
     scan_group = parser.add_argument_group("scan options")
     scan_group.add_argument(
-        "--profile",
-        required=True,
-        choices=PROFILES.keys(),
-        metavar="PROFILE",
-        help="Scan profile: safe | normal | fast | lab  (see above for details)"
-    )
-    scan_group.add_argument(
-        "--ports",
-        default="1-65535",
-        metavar="PORTS",
-        help="masscan port range  (default: 1-65535)\n"
-             "examples: 80,443  |  1-1024  |  1-65535"
+        "--rate",
+        type=int,
+        default=50_000,
+        metavar="PPS",
+        help="masscan packet rate in packets/sec  (default: 50000)"
     )
     scan_group.add_argument(
         "--exclude",
@@ -1011,11 +904,32 @@ def parse_args() -> argparse.Namespace:
     scan_group.add_argument(
         "--workers",
         type=int,
-        default=None,
+        default=20,
         metavar="N",
-        help="Override nmap deep-dive worker count from profile\n"
-             "profile defaults: safe=3  normal=20  fast=30  lab=30\n"
-             "higher = faster but more load on target network"
+        help="Parallel nmap deep-dive workers  (default: 20)"
+    )
+    scan_group.add_argument(
+        "--timeout",
+        type=int,
+        default=400,
+        metavar="SEC",
+        help="nmap per-host timeout in seconds  (default: 400)"
+    )
+    scan_group.add_argument(
+        "--confirm-workers",
+        type=int,
+        default=25,
+        dest="confirm_workers",
+        metavar="N",
+        help="Parallel workers for TCP connect confirmation  (default: 25)"
+    )
+    scan_group.add_argument(
+        "--confirm-timeout",
+        type=int,
+        default=2,
+        dest="confirm_timeout",
+        metavar="SEC",
+        help="Per-host timeout for TCP connect confirmation  (default: 2)"
     )
 
     # Output options
@@ -1030,7 +944,7 @@ def parse_args() -> argparse.Namespace:
     # Developer options
     dev_group = parser.add_argument_group("developer options")
     dev_group.add_argument(
-        "--from-xml",
+        "--from-masscan-xml",
         default=None,
         metavar="MASSCAN_XML",
         help="Skip masscan stage, use existing masscan XML file\n"
@@ -1055,14 +969,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     # Suppress default SIGINT traceback — we handle it cleanly at __main__
-    import signal
     signal.signal(signal.SIGINT, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
 
-    if os.geteuid() != 0:
+    args = parse_args()
+
+    # masscan and nmap require root; report-only modes do not
+    if not args.from_nmap_xml and os.geteuid() != 0:
         print("[!] Requires root. Run: sudo python3 scanner.py ...")
         sys.exit(1)
-
-    args    = parse_args()
 
     # --from-nmap-xml: skip everything except xlsx + eyewitness
     if args.from_nmap_xml:
@@ -1107,31 +1021,21 @@ def main() -> None:
                            capture_output=True)
         sys.exit(0)
 
-    profile = PROFILES[args.profile].copy()
-
-    # --workers overrides the profile's nmap_workers at runtime
-    if args.workers is not None:
-        if args.workers < 1:
-            print("[!] --workers must be >= 1")
-            sys.exit(1)
-        profile["nmap_workers"] = args.workers
-
     debug = args.debug
-
-    optional             = check_dependencies(skip_masscan=args.from_xml is not None)
-    run_eyewitness_stage = optional.get("eyewitness", False)
 
     scan_start = datetime.now()
 
-    if args.from_xml:
-        if not os.path.isfile(args.from_xml):
-            print(f"[!] XML file not found: {args.from_xml}")
+    if args.from_masscan_xml:
+        if not os.path.isfile(args.from_masscan_xml):
+            print(f"[!] XML file not found: {args.from_masscan_xml}")
             sys.exit(1)
-        masscan_xml    = Path(args.from_xml)
+        optional             = check_dependencies(skip_masscan=True)
+        run_eyewitness_stage = optional.get("eyewitness", False)
+        masscan_xml    = Path(args.from_masscan_xml)
         outdir         = Path(args.outdir) if args.outdir else masscan_xml.parent
         display_target = str(masscan_xml)
         outdir.mkdir(parents=True, exist_ok=True)
-        print(f"[*] --from-xml mode  : skipping masscan, using {masscan_xml}")
+        print(f"[*] --from-masscan-xml mode  : skipping masscan, using {masscan_xml}")
         print(f"[*] Output dir       : {outdir}/")
         print()
 
@@ -1144,6 +1048,10 @@ def main() -> None:
             sys.exit(1)
         if args.target:
             validate_target(args.target)
+
+        # All targets validated — now check dependencies
+        optional             = check_dependencies(skip_masscan=False)
+        run_eyewitness_stage = optional.get("eyewitness", False)
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         if args.outdir:
@@ -1163,31 +1071,27 @@ def main() -> None:
             host_count     = estimate_hosts(args.target)
             display_target = args.target
 
-        est_secs = (65535 * host_count) // profile["rate"]
+        est_secs = (65535 * host_count) // args.rate
 
-        print(f"  target   : {display_target}")
-        print(f"  profile  : {args.profile} — {profile['desc']}")
-        print(f"  rate     : {profile['rate']:,} pps  ({profile['bw']})")
-        print(f"  ports    : {args.ports}")
-        print(f"  est. time: ~{format_time(est_secs)}")
-        print(f"  output   : {outdir}/")
+        print(f"  target          : {display_target}")
+        print(f"  rate            : {args.rate:,} pps")
+        print(f"  workers         : nmap={args.workers}  confirm={args.confirm_workers}")
+        print(f"  timeout         : nmap={args.timeout}s  confirm={args.confirm_timeout}s")
+        print(f"  est. time       : ~{format_time(est_secs)}")
+        print(f"  output          : {outdir}/")
         if args.exclude:
-            print(f"  exclude  : {args.exclude}")
+            print(f"  exclude         : {args.exclude}")
         if debug:
-            print(f"  debug    : enabled")
+            print(f"  debug           : enabled")
         print()
-
-        if profile["confirm"]:
-            confirm_safe_profile()
 
         print("[1/6] masscan — full port discovery")
         run_masscan(
-            profile    = profile,
-            target     = args.target or "",
-            il_file    = args.il_file or "",
-            port_range = args.ports,
-            exclude    = args.exclude,
-            outfile    = masscan_xml,
+            rate    = args.rate,
+            target  = args.target or "",
+            il_file = args.il_file or "",
+            exclude = args.exclude,
+            outfile = masscan_xml,
         )
 
         if not masscan_xml.exists() or masscan_xml.stat().st_size == 0:
@@ -1203,24 +1107,26 @@ def main() -> None:
 
     portmap_path = write_parse_outputs(portmap, outdir)
 
-    if profile["confirm"]:
-        print("[3/6] confirm — filtering false positives")
-        confirmed_map, confirmed_ports_path = confirm_hosts(portmap, profile, outdir, debug=debug)
-        if not confirmed_map:
-            print("[!] No hosts survived confirmation.")
-            sys.exit(0)
-    else:
-        print("[3/6] confirm — skipped by profile")
-        confirmed_map        = portmap
-        confirmed_ports_path = outdir / "confirmed_ports_map.csv"
-        with open(confirmed_ports_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["host", "ports"])
-            for ip in sort_ips(list(confirmed_map.keys())):
-                writer.writerow([ip, ",".join(str(p) for p in sorted(confirmed_map[ip]))])
+    print("[3/6] confirm — TCP connect, filtering proxied/dead ports")
+    confirmed_map, confirmed_ports_path = confirm_hosts(
+        portmap  = portmap,
+        workers  = args.confirm_workers,
+        timeout  = args.confirm_timeout,
+        outdir   = outdir,
+        debug    = debug,
+    )
+    if not confirmed_map:
+        print("[!] No hosts survived confirmation.")
+        sys.exit(0)
 
     print("[4/6] nmap    — deep dive fingerprinting")
-    combined_xml, timed_out = run_nmap_deep_dive(confirmed_map, profile, outdir, debug=debug)
+    combined_xml, timed_out = run_nmap_deep_dive(
+        confirmed_map = confirmed_map,
+        workers       = args.workers,
+        timeout       = args.timeout,
+        outdir        = outdir,
+        debug         = debug,
+    )
 
     print("[5/6] xlsx     — building results spreadsheet")
     xlsx_path = write_xlsx(combined_xml, outdir)
@@ -1251,7 +1157,6 @@ def main() -> None:
         print(f"  timed out       : {len(timed_out)}  (see debug/nmap_timed_out.txt)")
     print()
     print("  --- important files ---")
-    print(f"  confirmed ports : {confirmed_ports_path}")
     print(f"  nmap XML        : {combined_xml}")
     print(f"  nmap per-host   : {outdir}/nmap/  (.xml .nmap .gnmap)")
     if xlsx_path:
@@ -1268,7 +1173,9 @@ def main() -> None:
         print(f"                    eyewitness -x {combined_xml} --web --no-prompt -d {outdir}/eyewitness")
     print()
     print("  --- debug / raw data ---")
-    print(f"  {outdir}/debug/")
+    print(f"  masscan ports   : {portmap_path}")
+    print(f"  confirmed ports : {confirmed_ports_path}")
+    print(f"  {outdir}/debug/  (hosts, summaries, timed-out)")
     print("=" * 60)
     print()
 
