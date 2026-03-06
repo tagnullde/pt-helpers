@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-# NOT SAFE FOR WORK YET!
 # ----------------------------------------------------------------------------- #
-#                    scanner.py — masscan + parse + confirm + nmap + eyewitness #
+#             scanner.py — masscan + parse + confirm + nmap + eyewitness        #
 #                         by x41 and the praktikant  (v4.4)                     #
 # ----------------------------------------------------------------------------- #
 # Stages:
 #   1. masscan     — full port discovery (1-65535)
 #   2. parse       — extract hosts/ports from masscan XML
-#   3. confirm     — full TCP connect per port, filters proxied/dead ports
-#                    only confirmed-open ports proceed to nmap
-#   4. nmap        — -sV -sC -O per host on confirmed ports only
-#                    produces per-host XMLs + merged nmap_combined.xml
+#   3. confirm     — full TCP connect per port, filters proxied/dead ports only confirmed-open ports proceed to nmap
+#   4. nmap        — -sV -sC -O per host on confirmed ports only produces per-host XMLs + merged nmap_combined.xml
 #   5. xlsx        — nmap_results.xlsx from combined XML (openpyxl)
 #   6. eyewitness  — screenshots of web services (optional, if installed)
 #
