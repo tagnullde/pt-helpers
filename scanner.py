@@ -2,7 +2,7 @@
 # NOT SAFE FOR WORK YET!
 # ----------------------------------------------------------------------------- #
 #                    scanner.py — masscan + parse + confirm + nmap + eyewitness #
-#                         by x41 and the praktikant  (v1.8)                     #
+#                         by x41 and the praktikant  (v2.0)                     #
 # ----------------------------------------------------------------------------- #
 # Stages:
 #   1. masscan     — full port discovery (1-65535)
@@ -90,6 +90,28 @@ PROBE_PREFER = [22, 445, 80, 443, 389, 3389, 21, 25, 8080, 8443, 8888, 9090, 944
 
 
 # ----------------------------------------------------------------------------- #
+# Progress bar
+# ----------------------------------------------------------------------------- #
+def _bar(n: int, total: int, width: int = 35, label: str = "") -> str:
+    """Return an animated progress bar string for in-place terminal updates."""
+    pct   = n / total if total else 1
+    filled = int(width * pct)
+    bar   = "█" * filled + "░" * (width - filled)
+    suffix = f" {label}" if label else ""
+    return f"  [{bar}] {n}/{total}{suffix}"
+
+
+def _print_bar(n: int, total: int, label: str = "") -> None:
+    """Print progress bar in-place (overwrites current line)."""
+    print(f"\r{_bar(n, total, label=label)}", end="", flush=True)
+
+
+def _end_bar(total: int, label: str = "") -> None:
+    """Complete the bar at 100% and move to next line."""
+    print(f"\r{_bar(total, total, label=label)}")
+
+
+# ----------------------------------------------------------------------------- #
 # Helpers
 # ----------------------------------------------------------------------------- #
 def sort_ips(ips: list[str]) -> list[str]:
@@ -167,34 +189,26 @@ def confirm_safe_profile() -> None:
 # Dependency checks
 # ----------------------------------------------------------------------------- #
 def check_dependencies(skip_masscan: bool) -> dict[str, bool]:
-    print("[*] Checking dependencies")
-
     required = ["nmap"]
     if not skip_masscan:
         required.append("masscan")
 
     for tool in required:
         found = subprocess.run(["which", tool], capture_output=True).returncode == 0
-        status = "✓" if found else "✗"
-        print(f"  {status}  {tool:<20} {'found' if found else 'NOT FOUND (required)'}")
         if not found:
-            print(f"[!] {tool} is required but not installed. Aborting.")
+            print(f"[!] required tool not found: {tool}")
             sys.exit(1)
 
     optional = {"eyewitness": False}
     for tool in optional:
         found = subprocess.run(["which", tool], capture_output=True).returncode == 0
         optional[tool] = found
-        status = "✓" if found else "?"
-        note   = "found" if found else "not found (optional — stage will be skipped)"
-        print(f"  {status}  {tool:<20} {note}")
         if not found:
-            answer = input(f"    {tool} not installed. Continue without it? (yes/no): ").strip()
+            answer = input(f"[?] {tool} not installed — continue without it? (yes/no): ").strip()
             if answer != "yes":
                 print("[!] Aborted.")
                 sys.exit(1)
 
-    print()
     return optional
 
 
@@ -229,12 +243,49 @@ def run_masscan(
         else:
             cmd += ["--exclude", exclude]
 
-    print(f"[*] Running: {' '.join(cmd)}")
-    print()
+    # Run masscan with stderr piped so we can parse its progress lines.
+    # masscan writes status to stderr in the form:
+    #   rate:  49983; found: 234; remaining: 00:01:22; waiting...
+    # We parse "remaining" to show a live progress bar.
+    import re as _re
+    import threading
 
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        print(f"[!] masscan exited with code {result.returncode}")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    found_count = {"n": 0}
+    rate_str    = {"v": ""}
+    done_event  = threading.Event()
+
+    def read_stderr():
+        for line in proc.stderr:
+            line = line.strip()
+            # rate:  49983; found: 234; remaining: 00:01:22; waiting...
+            m_found = _re.search(r"found:\s*(\d+)", line)
+            m_rate  = _re.search(r"rate:\s*([\d,]+)", line)
+            m_rem   = _re.search(r"remaining:\s*(\S+)", line)
+            if m_found:
+                found_count["n"] = int(m_found.group(1))
+            if m_rate:
+                rate_str["v"] = m_rate.group(1).replace(",", "")
+            if m_rem:
+                rem = m_rem.group(1)
+                label = f"found: {found_count['n']}  remaining: {rem}  rate: {rate_str['v']} pps"
+                print(f"\r  [masscan] {label:<70}", end="", flush=True)
+        done_event.set()
+
+    t = threading.Thread(target=read_stderr, daemon=True)
+    t.start()
+    proc.wait()
+    done_event.wait(timeout=5)
+    print(f"\r  [+] masscan done — {found_count['n']} open ports found{' ' * 40}")
+
+    if proc.returncode not in (0, 1):  # masscan exits 1 on Ctrl+C partial runs
+        print(f"[!] masscan exited with code {proc.returncode}")
         sys.exit(1)
 
 
@@ -269,33 +320,33 @@ def parse_masscan_xml(path: Path) -> dict[str, set[int]]:
     return portmap
 
 
-def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> None:
+def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> tuple[Path, Path]:
+    """Write masscan parse outputs. Returns (portmap_path, debug_dir) for summary use."""
     sorted_hosts = sort_ips(list(portmap.keys()))
     all_ports    = sorted(set(p for ports in portmap.values() for p in ports))
-    union_csv    = ",".join(str(p) for p in all_ports)
     probes       = {ip: select_probe(portmap[ip]) for ip in sorted_hosts}
 
-    alive_path   = outdir / "masscan_alive_hosts.txt"
+    # Important output — confirmed ports map used by nmap stage
     portmap_path = outdir / "masscan_ports_map.csv"
-    union_path   = outdir / "masscan_union_ports.txt"
-    probes_path  = outdir / "masscan_confirmation_probes.txt"
-    summary_path = outdir / "masscan_summary.txt"
-
-    with open(alive_path, "w") as f:
-        for ip in sorted_hosts:
-            f.write(ip + "\n")
-
     with open(portmap_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["host", "ports"])
         for ip in sorted_hosts:
             writer.writerow([ip, ",".join(str(p) for p in sorted(portmap[ip]))])
 
-    with open(union_path, "w") as f:
+    # Debug outputs — useful for troubleshooting, not needed day-to-day
+    debug_dir = outdir / "debug"
+    debug_dir.mkdir(exist_ok=True)
+
+    with open(debug_dir / "masscan_alive_hosts.txt", "w") as f:
+        for ip in sorted_hosts:
+            f.write(ip + "\n")
+
+    with open(debug_dir / "masscan_union_ports.txt", "w") as f:
         for port in all_ports:
             f.write(str(port) + "\n")
 
-    with open(probes_path, "w", newline="") as f:
+    with open(debug_dir / "masscan_confirmation_probes.txt", "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["host", "probe_port"])
         for ip in sorted_hosts:
@@ -306,8 +357,6 @@ def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> None:
         "",
         f"Alive hosts (masscan)  : {len(sorted_hosts)}",
         f"Unique ports           : {len(all_ports)}",
-        f"Confirmation probes    : {len(probes)}",
-        f"Union ports            : {union_csv}",
         "",
         "--- Per-host breakdown (ports / probe) ---",
     ]
@@ -315,16 +364,11 @@ def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> None:
         ports_str = ",".join(str(p) for p in sorted(portmap[ip]))
         lines.append(f"  {ip:<20}  ports: {ports_str:<60}  probe: {probes[ip]}")
 
-    summary = "\n".join(lines)
-    print(summary)
+    with open(debug_dir / "masscan_summary.txt", "w") as f:
+        f.write("\n".join(lines) + "\n")
 
-    with open(summary_path, "w") as f:
-        f.write(summary + "\n")
-
-    print(f"\n  Masscan outputs:")
-    for p in [alive_path, portmap_path, union_path, probes_path, summary_path]:
-        print(f"    {p}")
-    print()
+    print(f"  [+] masscan: {len(sorted_hosts)} hosts, {len(all_ports)} unique ports")
+    return portmap_path, debug_dir
 
 
 # ----------------------------------------------------------------------------- #
@@ -379,21 +423,20 @@ def confirm_hosts(
     portmap: dict[str, set[int]],
     profile: dict,
     outdir:  Path,
+    debug:   bool = False,
 ) -> dict[str, set[int]]:
-    sorted_hosts     = sort_ips(list(portmap.keys()))
-    total            = len(sorted_hosts)
-    workers          = profile["confirm_workers"]
-    timeout          = profile["confirm_timeout"]
-    confirmed_map:   dict[str, set[int]] = {}
-    dropped:         list[str] = []
+    sorted_hosts   = sort_ips(list(portmap.keys()))
+    total          = len(sorted_hosts)
+    workers        = profile["confirm_workers"]
+    timeout        = profile["confirm_timeout"]
+    confirmed_map: dict[str, set[int]] = {}
+    dropped:       list[str] = []
 
     counter      = {"n": 0}
     counter_lock = Lock()
     print_lock   = Lock()
 
-    print(f"[*] Stage 3: confirming {total} hosts  "
-          f"(workers: {workers}, timeout: {timeout}s per host)")
-    print()
+    _print_bar(0, total)
 
     def task(ip: str) -> tuple[str, set[int]]:
         return confirm_single_host(ip, portmap[ip], timeout)
@@ -407,34 +450,36 @@ def confirm_hosts(
                 n = counter["n"]
             with print_lock:
                 if confirmed_ports:
-                    conf_str = ",".join(str(p) for p in sorted(confirmed_ports))
-                    print(f"  [{n}/{total}] {ip:<20} ✓  {conf_str}")
                     confirmed_map[ip] = confirmed_ports
+                    if debug:
+                        conf_str = ",".join(str(p) for p in sorted(confirmed_ports))
+                        print(f"\n  {ip:<20} ✓  {conf_str}")
                 else:
-                    print(f"  [{n}/{total}] {ip:<20} ✗  dropped")
                     dropped.append(ip)
+                    if debug:
+                        print(f"\n  {ip:<20} ✗  dropped")
+                _print_bar(n, total)
 
-    print()
-
-    confirmed_hosts_path = outdir / "confirmed_hosts.txt"
-    confirmed_ports_path = outdir / "confirmed_ports_map.csv"
-    confirmed_summary    = outdir / "confirmed_summary.txt"
+    _end_bar(total)
 
     confirmed_sorted    = sort_ips(list(confirmed_map.keys()))
-    all_confirmed_ports = sorted(set(
-        p for ports in confirmed_map.values() for p in ports
-    ))
-    union_confirmed_csv = ",".join(str(p) for p in all_confirmed_ports)
+    all_confirmed_ports = sorted(set(p for ports in confirmed_map.values() for p in ports))
 
-    with open(confirmed_hosts_path, "w") as f:
-        for ip in confirmed_sorted:
-            f.write(ip + "\n")
-
+    # Always write confirmed ports map — important output used by nmap stage
+    confirmed_ports_path = outdir / "confirmed_ports_map.csv"
     with open(confirmed_ports_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["host", "ports"])
         for ip in confirmed_sorted:
             writer.writerow([ip, ",".join(str(p) for p in sorted(confirmed_map[ip]))])
+
+    # Debug outputs
+    debug_dir = outdir / "debug"
+    debug_dir.mkdir(exist_ok=True)
+
+    with open(debug_dir / "confirmed_hosts.txt", "w") as f:
+        for ip in confirmed_sorted:
+            f.write(ip + "\n")
 
     lines = [
         "=== confirmation summary ===",
@@ -443,30 +488,20 @@ def confirm_hosts(
         f"Hosts confirmed alive  : {len(confirmed_sorted)}",
         f"Hosts dropped          : {len(dropped)}",
         f"Unique confirmed ports : {len(all_confirmed_ports)}",
-        f"Union confirmed ports  : {union_confirmed_csv}",
         "",
         "--- Confirmed per-host ---",
     ]
     for ip in confirmed_sorted:
         ports_str = ",".join(str(p) for p in sorted(confirmed_map[ip]))
         lines.append(f"  {ip:<20}  {ports_str}")
-
     if dropped:
         lines += ["", "--- Dropped (SYN proxy / not alive) ---"]
         for ip in sort_ips(dropped):
             lines.append(f"  {ip}")
+    with open(debug_dir / "confirmed_summary.txt", "w") as f:
+        f.write("\n".join(lines) + "\n")
 
-    summary = "\n".join(lines)
-    print(summary)
-
-    with open(confirmed_summary, "w") as f:
-        f.write(summary + "\n")
-
-    print(f"\n  Confirmation outputs:")
-    for p in [confirmed_hosts_path, confirmed_ports_path, confirmed_summary]:
-        print(f"    {p}")
-    print()
-
+    print(f"  [+] confirmed: {len(confirmed_sorted)} alive, {len(dropped)} dropped")
     return confirmed_map
 
 
@@ -508,7 +543,8 @@ def run_nmap_deep_dive(
     confirmed_map: dict[str, set[int]],
     profile:       dict,
     outdir:        Path,
-) -> Path:
+    debug:         bool = False,
+) -> tuple[Path, list[str]]:
     sorted_hosts = sort_ips(list(confirmed_map.keys()))
     total        = len(sorted_hosts)
     workers      = profile["nmap_workers"]
@@ -517,9 +553,7 @@ def run_nmap_deep_dive(
     nmap_dir = outdir / "nmap"
     nmap_dir.mkdir(exist_ok=True)
 
-    print(f"[*] Stage 4: nmap deep dive — {total} hosts  "
-          f"(workers: {workers}, timeout: {timeout}s per host)")
-    print()
+    _print_bar(0, total)
 
     counter      = {"n": 0}
     counter_lock = Lock()
@@ -529,7 +563,8 @@ def run_nmap_deep_dive(
         ports     = confirmed_map[ip]
         ports_arg = ",".join(str(p) for p in sorted(ports))
         safe_ip   = ip.replace(".", "_")
-        xml_path  = nmap_dir / f"{safe_ip}.xml"
+        # -oA produces .xml + .nmap + .gnmap
+        oA_base   = nmap_dir / safe_ip
 
         cmd = [
             "nmap",
@@ -542,7 +577,7 @@ def run_nmap_deep_dive(
             "--max-retries", "1",
             "--host-timeout", f"{timeout}s",
             "-p", ports_arg,
-            "-oX", str(xml_path),
+            "-oA", str(oA_base),
             ip,
         ]
 
@@ -550,20 +585,28 @@ def run_nmap_deep_dive(
             counter["n"] += 1
             n = counter["n"]
 
-        with print_lock:
-            print(f"  [{n}/{total}] {ip:<20} ports: {len(ports)}")
-
         try:
             subprocess.run(cmd, capture_output=True, timeout=timeout + 30)
-            return ip, xml_path if xml_path.exists() else None
+            xml_path = Path(str(oA_base) + ".xml")
+            result_path = xml_path if xml_path.exists() else None
         except subprocess.TimeoutExpired:
-            with print_lock:
-                print(f"  [!] {ip} timed out")
-            return ip, None
+            result_path = None
+            if debug:
+                with print_lock:
+                    print(f"\n  [!] {ip} timed out")
         except Exception as e:
-            with print_lock:
-                print(f"  [!] {ip} error: {e}")
-            return ip, None
+            result_path = None
+            if debug:
+                with print_lock:
+                    print(f"\n  [!] {ip} error: {e}")
+
+        with print_lock:
+            _print_bar(n, total)
+            if debug:
+                status = f"✓ {len(ports)} ports" if result_path else "✗ timeout"
+                print(f"\n  {ip:<20} {status}")
+
+        return ip, result_path
 
     results: list[tuple[str, Path | None]] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -571,32 +614,34 @@ def run_nmap_deep_dive(
         for future in as_completed(futures):
             results.append(future.result())
 
-    print()
-
     successful = [(ip, p) for ip, p in results if p is not None]
     failed     = [ip for ip, p in results if p is None]
 
     combined_xml = outdir / "nmap_combined.xml"
     _merge_nmap_xmls([p for _, p in successful], combined_xml)
 
-    print(f"  Scanned    : {len(successful)}/{total} hosts")
-    if failed:
-        print(f"  Failed     : {', '.join(sort_ips(failed))}")
-    print(f"  Per-host   : {nmap_dir}/")
-    print(f"  Combined   : {combined_xml}")
-    print()
+    _end_bar(total)
+    print(f"  [+] nmap: {len(successful)}/{total} complete"
+          + (f", {len(failed)} timed out" if failed else ""))
 
-    return combined_xml
+    # Write timed-out hosts to debug dir for reference
+    if failed:
+        debug_dir = outdir / "debug"
+        debug_dir.mkdir(exist_ok=True)
+        with open(debug_dir / "nmap_timed_out.txt", "w") as f:
+            for ip in sort_ips(failed):
+                f.write(ip + "\n")
+
+    return combined_xml, failed
 
 
 # ----------------------------------------------------------------------------- #
 # Stage 5: EyeWitness
 # ----------------------------------------------------------------------------- #
-def run_eyewitness(combined_xml: Path, outdir: Path) -> None:
+def run_eyewitness(combined_xml: Path, outdir: Path) -> Path | None:
     """
-    Run EyeWitness against the merged nmap XML using -x.
-    Correct service labels are guaranteed because the flat per-profile
-    timeout gives nmap sufficient time to finish cleanly.
+    Run EyeWitness against the merged nmap XML.
+    Returns path to report.html if successful, None otherwise.
     """
     ew_dir = outdir / "eyewitness"
     if ew_dir.exists():
@@ -611,20 +656,16 @@ def run_eyewitness(combined_xml: Path, outdir: Path) -> None:
         "-d", str(ew_dir),
     ]
 
-    print(f"[*] Stage 5: EyeWitness")
-    print(f"[*] Running: {' '.join(cmd)}")
-    print()
+    print(f"  [*] running EyeWitness...", end="", flush=True)
+    result = subprocess.run(cmd, capture_output=True)
+    report = ew_dir / "report.html"
 
-    result = subprocess.run(cmd)
+    if result.returncode != 0 or not report.exists():
+        print(f"\r  [!] EyeWitness failed (exit {result.returncode})")
+        return None
 
-    if result.returncode != 0:
-        print(f"[!] EyeWitness exited with code {result.returncode}")
-    else:
-        print(f"\n  EyeWitness output : {ew_dir}/")
-        report = ew_dir / "report.html"
-        if report.exists():
-            print(f"  Report            : {report}")
-    print()
+    print(f"\r  [+] EyeWitness done")
+    return report
 
 
 # ----------------------------------------------------------------------------- #
@@ -730,6 +771,12 @@ def parse_args() -> argparse.Namespace:
         help="Skip masscan stage, use existing masscan XML file\n"
              "useful for re-running parse/confirm/nmap without rescanning"
     )
+    dev_group.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Show verbose per-host output during confirm and nmap stages"
+    )
 
     return parser.parse_args()
 
@@ -748,23 +795,25 @@ def main() -> None:
             print("[!] --workers must be >= 1")
             sys.exit(1)
         profile["nmap_workers"] = args.workers
-        print(f"[*] nmap workers overridden to {args.workers}")
+
+    debug = args.debug
 
     optional             = check_dependencies(skip_masscan=args.from_xml is not None)
     run_eyewitness_stage = optional.get("eyewitness", False)
 
-    print(f"[*] Working directory : {Path.cwd()}")
-    print()
+    scan_start = datetime.now()
 
     if args.from_xml:
         if not os.path.isfile(args.from_xml):
             print(f"[!] XML file not found: {args.from_xml}")
             sys.exit(1)
-        masscan_xml = Path(args.from_xml)
-        outdir      = Path(args.outdir) if args.outdir else masscan_xml.parent
+        masscan_xml    = Path(args.from_xml)
+        outdir         = Path(args.outdir) if args.outdir else masscan_xml.parent
+        display_target = str(masscan_xml)
         outdir.mkdir(parents=True, exist_ok=True)
-        print(f"\n[*] --from-xml: skipping masscan, using {masscan_xml}")
-        print(f"[*] Output dir : {outdir}/\n")
+        print(f"[*] --from-xml mode  : skipping masscan, using {masscan_xml}")
+        print(f"[*] Output dir       : {outdir}/")
+        print()
 
     else:
         if not args.il_file and not args.target:
@@ -796,24 +845,22 @@ def main() -> None:
 
         est_secs = (65535 * host_count) // profile["rate"]
 
-        print()
-        print(f"  Profile    : {args.profile} — {profile['desc']}")
-        print(f"  Rate       : {profile['rate']:,} pps  ({profile['bw']})")
-        print(f"  Retries    : {profile['retries']}")
-        print(f"  Target     : {display_target}")
-        print(f"  Hosts est. : {host_count:,}")
-        print(f"  Ports      : {args.ports}")
-        print(f"  Est. time  : ~{format_time(est_secs)}")
-        print(f"  Output     : {outdir}/")
+        print(f"  target   : {display_target}")
+        print(f"  profile  : {args.profile} — {profile['desc']}")
+        print(f"  rate     : {profile['rate']:,} pps  ({profile['bw']})")
+        print(f"  ports    : {args.ports}")
+        print(f"  est. time: ~{format_time(est_secs)}")
+        print(f"  output   : {outdir}/")
         if args.exclude:
-            print(f"  Exclude    : {args.exclude}")
+            print(f"  exclude  : {args.exclude}")
+        if debug:
+            print(f"  debug    : enabled")
         print()
 
         if profile["confirm"]:
             confirm_safe_profile()
 
-        print("[*] Stage 1: masscan")
-        print()
+        print("[1/5] masscan — full port discovery")
         run_masscan(
             profile    = profile,
             target     = args.target or "",
@@ -827,47 +874,65 @@ def main() -> None:
             print("[!] masscan produced no output.")
             sys.exit(1)
 
-    # Stage 2
-    print("[*] Stage 2: parsing masscan output")
-    print()
+    print("[2/5] parse   — extracting hosts and ports")
     portmap = parse_masscan_xml(masscan_xml)
 
     if not portmap:
         print("[!] No open TCP ports found.")
         sys.exit(0)
 
-    write_parse_outputs(portmap, outdir)
+    portmap_path, debug_dir = write_parse_outputs(portmap, outdir)
 
-    # Stage 3
-    confirmed_map = confirm_hosts(portmap, profile, outdir)
+    print("[3/5] confirm — filtering false positives")
+    confirmed_map = confirm_hosts(portmap, profile, outdir, debug=debug)
 
     if not confirmed_map:
         print("[!] No hosts survived confirmation.")
         sys.exit(0)
 
-    # Stage 4
-    combined_xml = run_nmap_deep_dive(confirmed_map, profile, outdir)
+    print("[4/5] nmap    — deep dive fingerprinting")
+    combined_xml, timed_out = run_nmap_deep_dive(confirmed_map, profile, outdir, debug=debug)
 
-    # Stage 5
+    ew_report = None
     if run_eyewitness_stage:
-        run_eyewitness(combined_xml, outdir)
+        print("[5/5] eyewitness — web screenshots")
+        ew_report = run_eyewitness(combined_xml, outdir)
     else:
-        print(f"[*] Skipping stage 5: eyewitness not available")
-        print(f"    Run manually: eyewitness -x {combined_xml} --web --no-prompt -d {outdir}/eyewitness")
-        print()
+        print("[5/5] eyewitness — skipped (not installed)")
+
+    elapsed = datetime.now() - scan_start
 
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         subprocess.run(["chown", "-R", f"{sudo_user}:{sudo_user}", str(outdir)],
                        capture_output=True)
-        print(f"[*] Ownership set to {sudo_user}")
 
-    print("[*] Pipeline complete.")
-    print(f"[*] Confirmed hosts : {len(confirmed_map)}")
-    print(f"[*] Output dir      : {outdir}/")
-    print(f"[*] Combined XML    : {combined_xml}")
-    if run_eyewitness_stage:
-        print(f"[*] EyeWitness      : {outdir}/eyewitness/report.html")
+    # ── Final summary ────────────────────────────────────────────────────────
+    print()
+    print("=" * 60)
+    print("  SCAN COMPLETE")
+    print("=" * 60)
+    print(f"  target          : {display_target}")
+    print(f"  elapsed         : {str(elapsed).split('.')[0]}")
+    print(f"  hosts alive     : {len(confirmed_map)}")
+    if timed_out:
+        print(f"  timed out       : {len(timed_out)}  (see debug/nmap_timed_out.txt)")
+    print()
+    print("  --- important files ---")
+    print(f"  confirmed ports : {portmap_path}")
+    print(f"  nmap XML        : {combined_xml}")
+    print(f"  nmap per-host   : {outdir}/nmap/  (.xml .nmap .gnmap)")
+    if ew_report:
+        print(f"  eyewitness      : {ew_report}")
+    elif run_eyewitness_stage:
+        print(f"  eyewitness      : failed — check {outdir}/eyewitness/")
+    else:
+        print(f"  eyewitness      : run manually:")
+        print(f"                    eyewitness -x {combined_xml} --web --no-prompt -d {outdir}/eyewitness")
+    print()
+    print("  --- debug / raw data ---")
+    print(f"  {outdir}/debug/")
+    print("=" * 60)
     print()
 
 
