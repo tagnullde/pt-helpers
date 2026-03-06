@@ -2,13 +2,13 @@
 # NOT SAFE FOR WORK YET!
 # ----------------------------------------------------------------------------- #
 #                    scanner.py — masscan + parse + confirm + nmap + eyewitness #
-#                         by x41 and the praktikant  (v2.0)                     #
+#                         by x41 and the praktikant  (v2.1)                     #
 # ----------------------------------------------------------------------------- #
 # Stages:
 #   1. masscan     — full port discovery (1-65535)
 #   2. parse       — extract hosts/ports from masscan XML
 #   3. confirm     — parallel nmap TCP connect, filters SYN proxy false positives
-#   4. deep        — nmap -sT -sV -sC -O per confirmed host on confirmed ports
+#   4. deep        — nmap -sV -sC -O per confirmed host on confirmed ports
 #                    produces per-host XMLs + merged nmap_combined.xml
 #   5. eyewitness  — screenshots web services from combined nmap XML (-x)
 #                    correct service labels guaranteed by scaled timeouts
@@ -26,8 +26,10 @@ import argparse
 import csv
 import os
 import re
+import shutil
 import subprocess
 import sys
+import threading
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -247,9 +249,6 @@ def run_masscan(
     # masscan writes status to stderr in the form:
     #   rate:  49983; found: 234; remaining: 00:01:22; waiting...
     # We parse "remaining" to show a live progress bar.
-    import re as _re
-    import threading
-
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -265,9 +264,9 @@ def run_masscan(
         for line in proc.stderr:
             line = line.strip()
             # rate:  49983; found: 234; remaining: 00:01:22; waiting...
-            m_found = _re.search(r"found:\s*(\d+)", line)
-            m_rate  = _re.search(r"rate:\s*([\d,]+)", line)
-            m_rem   = _re.search(r"remaining:\s*(\S+)", line)
+            m_found = re.search(r"found:\s*(\d+)", line)
+            m_rate  = re.search(r"rate:\s*([\d,]+)", line)
+            m_rem   = re.search(r"remaining:\s*(\S+)", line)
             if m_found:
                 found_count["n"] = int(m_found.group(1))
             if m_rate:
@@ -320,8 +319,8 @@ def parse_masscan_xml(path: Path) -> dict[str, set[int]]:
     return portmap
 
 
-def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> tuple[Path, Path]:
-    """Write masscan parse outputs. Returns (portmap_path, debug_dir) for summary use."""
+def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> Path:
+    """Write masscan parse outputs. Returns portmap_path for summary use."""
     sorted_hosts = sort_ips(list(portmap.keys()))
     all_ports    = sorted(set(p for ports in portmap.values() for p in ports))
     probes       = {ip: select_probe(portmap[ip]) for ip in sorted_hosts}
@@ -346,9 +345,11 @@ def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> tuple[Pat
         for port in all_ports:
             f.write(str(port) + "\n")
 
-    with open(debug_dir / "masscan_confirmation_probes.txt", "w", newline="") as f:
+    # Note: probe column is the "best" port per host for manual re-probing reference.
+    # The confirmation stage itself runs against all masscan ports, not just this one.
+    with open(debug_dir / "masscan_host_best_ports.txt", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["host", "probe_port"])
+        writer.writerow(["host", "best_port"])
         for ip in sorted_hosts:
             writer.writerow([ip, probes[ip]])
 
@@ -368,7 +369,7 @@ def write_parse_outputs(portmap: dict[str, set[int]], outdir: Path) -> tuple[Pat
         f.write("\n".join(lines) + "\n")
 
     print(f"  [+] masscan: {len(sorted_hosts)} hosts, {len(all_ports)} unique ports")
-    return portmap_path, debug_dir
+    return portmap_path
 
 
 # ----------------------------------------------------------------------------- #
@@ -645,7 +646,6 @@ def run_eyewitness(combined_xml: Path, outdir: Path) -> Path | None:
     """
     ew_dir = outdir / "eyewitness"
     if ew_dir.exists():
-        import shutil
         shutil.rmtree(ew_dir)
 
     cmd = [
@@ -881,7 +881,7 @@ def main() -> None:
         print("[!] No open TCP ports found.")
         sys.exit(0)
 
-    portmap_path, debug_dir = write_parse_outputs(portmap, outdir)
+    portmap_path = write_parse_outputs(portmap, outdir)
 
     print("[3/5] confirm — filtering false positives")
     confirmed_map = confirm_hosts(portmap, profile, outdir, debug=debug)
