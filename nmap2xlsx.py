@@ -2,7 +2,7 @@
 # NOT SAFE FOR WORK YET!
 # ----------------------------------------------------------------------------- #
 #                    scanner.py — masscan + parse + confirm + nmap + eyewitness #
-#                         by x41 and the praktikant  (v3.1)                     #
+#                         by x41 and the praktikant  (v3.3)                     #
 # ----------------------------------------------------------------------------- #
 # Stages:
 #   1. masscan     — full port discovery (1-65535)
@@ -12,8 +12,7 @@
 #                    produces per-host XMLs + merged nmap_combined.xml
 #   5. xlsx        — nmap_results.xlsx from combined XML (openpyxl)
 #   6. eyewitness  — screenshots web services from combined nmap XML (-x)
-#                    correct service labels guaranteed by scaled timeouts
-#                    flat timeout per profile ensures nmap finishes cleanly
+#                    flat timeout per profile (safe=300s, others=400s)
 #
 # Usage:
 #   sudo python3 scanner.py --profile <safe|normal|fast|lab> <TARGET>
@@ -124,6 +123,7 @@ class Spinner:
         self.interval = interval
         self._n       = 0
         self._frame   = 0
+        self._label   = ""
         self._stop    = threading.Event()
         self._lock    = threading.Lock()
         self._thread  = threading.Thread(target=self._run, daemon=True)
@@ -136,13 +136,18 @@ class Spinner:
         with self._lock:
             self._n += 1
 
+    def set_label(self, label: str) -> None:
+        """Update status label — used in indeterminate mode (total=0)."""
+        with self._lock:
+            self._label = label
+
     def stop(self, final_line: str = "") -> None:
         if self._stop.is_set():
             return  # already stopped — safe to call multiple times
         self._stop.set()
         self._thread.join()
         # erase spinner line, print final result
-        print(f"\r{' ' * 50}\r", end="", flush=True)
+        print(f"\r{' ' * 70}\r", end="", flush=True)
         if final_line:
             print(final_line)
 
@@ -150,9 +155,14 @@ class Spinner:
         while not self._stop.is_set():
             with self._lock:
                 n     = self._n
+                label = self._label
                 frame = _SPINNER_FRAMES[self._frame % len(_SPINNER_FRAMES)]
                 self._frame += 1
-            print(f"\r  [ {frame} ] {n}/{self.total} ", end="", flush=True)
+            if self.total:
+                suffix = f"{n}/{self.total}"
+            else:
+                suffix = label  # indeterminate — show label from set_label()
+            print(f"\r  [ {frame} ] {suffix} ", end="", flush=True)
             self._stop.wait(self.interval)
 
 
@@ -207,8 +217,8 @@ def validate_target(target: str) -> None:
             print(f"[!] Target {target} is a single host (/32).")
             print(f"    masscan on a single host may miss ports due to self-routing load.")
             print(f"    For single hosts, nmap is more reliable.")
-            answer = input("    Continue anyway? (yes/no): ").strip()
-            if answer != "yes":
+            answer = input("    Continue anyway? (y/n): ").strip().lower()
+            if answer not in ("y", "yes"):
                 print("[!] Aborted.")
                 sys.exit(1)
     except ValueError:
@@ -223,8 +233,8 @@ def confirm_safe_profile() -> None:
     print("  │  • Fragile / medical devices identified and excluded    │")
     print("  └─────────────────────────────────────────────────────────┘")
     print()
-    answer = input("  Type 'yes' to continue: ").strip()
-    if answer != "yes":
+    answer = input("  Type yes to continue (y/n): ").strip().lower()
+    if answer not in ("y", "yes"):
         print("[!] Aborted.")
         sys.exit(1)
     print()
@@ -233,24 +243,25 @@ def confirm_safe_profile() -> None:
 # ----------------------------------------------------------------------------- #
 # Dependency checks
 # ----------------------------------------------------------------------------- #
-def check_dependencies(skip_masscan: bool) -> dict[str, bool]:
-    required = ["nmap"]
+def check_dependencies(skip_masscan: bool, require_nmap: bool = True) -> dict[str, bool]:
+    required = []
+    if require_nmap:
+        required.append("nmap")
     if not skip_masscan:
         required.append("masscan")
 
     for tool in required:
-        found = subprocess.run(["which", tool], capture_output=True).returncode == 0
-        if not found:
+        if not shutil.which(tool):
             print(f"[!] required tool not found: {tool}")
             sys.exit(1)
 
     optional = {"eyewitness": False}
     for tool in optional:
-        found = subprocess.run(["which", tool], capture_output=True).returncode == 0
+        found = shutil.which(tool) is not None
         optional[tool] = found
         if not found:
-            answer = input(f"[?] {tool} not installed — continue without it? (yes/no): ").strip()
-            if answer != "yes":
+            answer = input(f"[?] {tool} not installed — continue without it? (y/n): ").strip().lower()
+            if answer not in ("y", "yes"):
                 print("[!] Aborted.")
                 sys.exit(1)
 
@@ -291,7 +302,7 @@ def run_masscan(
     # Run masscan with stderr piped so we can parse its progress lines.
     # masscan writes status to stderr in the form:
     #   rate:  49983; found: 234; remaining: 00:01:22; waiting...
-    # We parse "remaining" to show a live progress bar.
+    # Spinner runs in indeterminate mode (total=0); label updates with live stats.
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -300,35 +311,56 @@ def run_masscan(
     )
 
     found_count = {"n": 0}
-    rate_str    = {"v": ""}
-    done_event  = threading.Event()
+    sp = Spinner(total=0).start()  # indeterminate — shows label instead of n/total
 
     def read_stderr():
+        # Accumulate state from whatever masscan emits — different lines
+        # carry different fields, so we build the label from running totals.
+        state = {"pct": "", "rate": "", "found": "0", "rem": ""}
         for line in proc.stderr:
             line = line.strip()
-            # rate:  49983; found: 234; remaining: 00:01:22; waiting...
+            m_pct   = re.search(r"([\d.]+)%", line)
+            m_rate  = re.search(r"rate:\s*([\d.]+-\w+)", line)
             m_found = re.search(r"found:\s*(\d+)", line)
-            m_rate  = re.search(r"rate:\s*([\d,]+)", line)
             m_rem   = re.search(r"remaining:\s*(\S+)", line)
+            if m_pct:   state["pct"]   = m_pct.group(1) + "%"
+            if m_rate:  state["rate"]  = m_rate.group(1)
             if m_found:
+                state["found"] = m_found.group(1)
                 found_count["n"] = int(m_found.group(1))
-            if m_rate:
-                rate_str["v"] = m_rate.group(1).replace(",", "")
-            if m_rem:
-                rem = m_rem.group(1)
-                label = f"found: {found_count['n']}  remaining: {rem}  rate: {rate_str['v']} pps"
-                print(f"\r  [masscan] {label:<70}", end="", flush=True)
-        done_event.set()
+            if m_rem:   state["rem"]   = m_rem.group(1).rstrip(";")
+
+            parts = []
+            if state["pct"]:   parts.append(state["pct"])
+            if state["rem"]:   parts.append(f"ETA: {state['rem']}")
+            if state["rate"]:  parts.append(f"rate: {state['rate']}")
+            parts.append(f"found: {state['found']}")
+            sp.set_label(f"{'  '.join(parts):<55}")
 
     t = threading.Thread(target=read_stderr, daemon=True)
     t.start()
-    proc.wait()
-    done_event.wait(timeout=5)
-    print(f"\r  [+] masscan done — {found_count['n']} open ports found{' ' * 40}")
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        proc.wait()
+        sp.stop()
+        raise
+    t.join(timeout=5)
+    sp.stop(f"  [+] masscan done — {found_count['n']} open ports found")
 
-    if proc.returncode not in (0, 1):  # masscan exits 1 on Ctrl+C partial runs
-        print(f"[!] masscan exited with code {proc.returncode}")
-        sys.exit(1)
+    # Exit code 1 can mean partial run (Ctrl+C) or real error.
+    # Check whether the XML exists and is parseable instead of trusting the code.
+    if proc.returncode != 0:
+        if not outfile.exists() or outfile.stat().st_size == 0:
+            print(f"[!] masscan failed (exit {proc.returncode}) and produced no output")
+            sys.exit(1)
+        try:
+            ET.parse(outfile)
+        except ET.ParseError:
+            print(f"[!] masscan failed (exit {proc.returncode}) and output is not valid XML")
+            sys.exit(1)
+        # XML exists and is valid — partial run is usable, continue
 
 
 # ----------------------------------------------------------------------------- #
@@ -480,7 +512,7 @@ def confirm_hosts(
     profile: dict,
     outdir:  Path,
     debug:   bool = False,
-) -> dict[str, set[int]]:
+) -> tuple[dict[str, set[int]], Path]:
     sorted_hosts   = sort_ips(list(portmap.keys()))
     total          = len(sorted_hosts)
     workers        = profile["confirm_workers"]
@@ -561,7 +593,7 @@ def confirm_hosts(
         f.write("\n".join(lines) + "\n")
 
     sp.stop(f"  [+] confirmed: {len(confirmed_sorted)} alive, {len(dropped)} dropped")
-    return confirmed_map
+    return confirmed_map, confirmed_ports_path
 
 
 # ----------------------------------------------------------------------------- #
@@ -612,7 +644,7 @@ def run_nmap_deep_dive(
     nmap_dir = outdir / "nmap"
     nmap_dir.mkdir(exist_ok=True)
 
-    sp = Spinner(total).start()
+    sp = Spinner(total).start() if not debug else None
 
     # Registry of all live nmap child processes so we can kill them on Ctrl+C
     _procs:      list[subprocess.Popen] = []
@@ -669,13 +701,12 @@ def run_nmap_deep_dive(
                     print(f"\n  [!] {ip} error: {e}")
 
         if not _abort.is_set():
-            sp.update()
+            if sp is not None:
+                sp.update()
             if debug:
                 with print_lock:
                     status = f"✓ {len(ports)} ports" if result_path else "✗ timeout"
-                    sp.stop(f"  {ip:<20} {status}")
-                    # only restart spinner if we are not the last task
-                    sp.start()
+                    print(f"  {ip:<20} {status}")
 
         return ip, result_path
 
@@ -707,7 +738,8 @@ def run_nmap_deep_dive(
     except KeyboardInterrupt:
         _abort.set()
         _kill_all_procs()
-        sp.stop()
+        if sp is not None:
+            sp.stop()
         raise
 
     successful = [(ip, p) for ip, p in results if p is not None]
@@ -716,8 +748,12 @@ def run_nmap_deep_dive(
     combined_xml = outdir / "nmap_combined.xml"
     _merge_nmap_xmls([p for _, p in successful], combined_xml)
 
-    sp.stop(f"  [+] nmap: {len(successful)}/{total} complete"
-          + (f", {len(failed)} timed out" if failed else ""))
+    if sp is not None:
+        sp.stop(f"  [+] nmap: {len(successful)}/{total} complete"
+              + (f", {len(failed)} timed out" if failed else ""))
+    else:
+        print(f"  [+] nmap: {len(successful)}/{total} complete"
+              + (f", {len(failed)} timed out" if failed else ""))
 
     # Write timed-out hosts to debug dir for reference
     if failed:
@@ -1036,7 +1072,7 @@ def main() -> None:
             sys.exit(1)
         outdir = Path(args.outdir) if args.outdir else nmap_xml.parent
         outdir.mkdir(parents=True, exist_ok=True)
-        optional             = check_dependencies(skip_masscan=True)
+        optional             = check_dependencies(skip_masscan=True, require_nmap=False)
         run_eyewitness_stage = optional.get("eyewitness", False)
         print(f"[*] --from-nmap-xml  : skipping scan stages")
         print(f"[*] nmap XML         : {nmap_xml}")
@@ -1167,12 +1203,21 @@ def main() -> None:
 
     portmap_path = write_parse_outputs(portmap, outdir)
 
-    print("[3/6] confirm — filtering false positives")
-    confirmed_map = confirm_hosts(portmap, profile, outdir, debug=debug)
-
-    if not confirmed_map:
-        print("[!] No hosts survived confirmation.")
-        sys.exit(0)
+    if profile["confirm"]:
+        print("[3/6] confirm — filtering false positives")
+        confirmed_map, confirmed_ports_path = confirm_hosts(portmap, profile, outdir, debug=debug)
+        if not confirmed_map:
+            print("[!] No hosts survived confirmation.")
+            sys.exit(0)
+    else:
+        print("[3/6] confirm — skipped by profile")
+        confirmed_map        = portmap
+        confirmed_ports_path = outdir / "confirmed_ports_map.csv"
+        with open(confirmed_ports_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["host", "ports"])
+            for ip in sort_ips(list(confirmed_map.keys())):
+                writer.writerow([ip, ",".join(str(p) for p in sorted(confirmed_map[ip]))])
 
     print("[4/6] nmap    — deep dive fingerprinting")
     combined_xml, timed_out = run_nmap_deep_dive(confirmed_map, profile, outdir, debug=debug)
@@ -1206,7 +1251,7 @@ def main() -> None:
         print(f"  timed out       : {len(timed_out)}  (see debug/nmap_timed_out.txt)")
     print()
     print("  --- important files ---")
-    print(f"  confirmed ports : {portmap_path}")
+    print(f"  confirmed ports : {confirmed_ports_path}")
     print(f"  nmap XML        : {combined_xml}")
     print(f"  nmap per-host   : {outdir}/nmap/  (.xml .nmap .gnmap)")
     if xlsx_path:
