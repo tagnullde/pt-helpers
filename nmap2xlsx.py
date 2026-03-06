@@ -2,7 +2,7 @@
 # NOT SAFE FOR WORK YET!
 # ----------------------------------------------------------------------------- #
 #                    scanner.py — masscan + parse + confirm + nmap + eyewitness #
-#                         by x41 and the praktikant  (v2.7)                     #
+#                         by x41 and the praktikant  (v3.1)                     #
 # ----------------------------------------------------------------------------- #
 # Stages:
 #   1. masscan     — full port discovery (1-65535)
