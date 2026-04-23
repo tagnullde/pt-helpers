@@ -3,8 +3,8 @@ set -euo pipefail
 
 CONF_URL="https://raw.githubusercontent.com/tagnullde/pt-helpers/refs/heads/main/tmux.conf"
 CONF_PATH="$HOME/.pt-tmux.conf"
-SOCKET="pt"
-SESSION="pt"
+SOCKET="pt-x41"
+SESSION="x41"
 
 # Fetch latest config
 if ! curl -fsSL "$CONF_URL" -o "$CONF_PATH"; then
