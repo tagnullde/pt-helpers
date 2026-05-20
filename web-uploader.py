@@ -27,46 +27,65 @@ def make_zip(dest):
                     pass
     return bio.getvalue()
 
+def make_filtered_zip(base_dir, rel_paths):
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for rel in rel_paths:
+            full = os.path.realpath(os.path.join(base_dir, rel))
+            if not (full == base_dir or full.startswith(base_dir + os.sep)): continue
+            if not os.path.exists(full): continue
+            if os.path.isdir(full):
+                for root, dirs, files in os.walk(full):
+                    for f in files:
+                        path = os.path.join(root, f)
+                        arcname = os.path.relpath(path, base_dir)
+                        try: zf.write(path, arcname)
+                        except OSError: pass
+            else:
+                try: zf.write(full, os.path.relpath(full, base_dir))
+                except OSError: pass
+    return bio.getvalue()
+
 PAGE = '''<!doctype html><meta charset=utf-8><title>__TITLE__</title>
 <style>
-:root{--bg:#0d1117;--fg:#c9d1d9;--link:#58a6ff;--border:#30363d;--input-bg:#161b22;--drop-bg:#1a1f2a}
-body{background:var(--bg);color:var(--fg);font:14px monospace;margin:2em;max-width:900px}
-h2,h3{color:var(--link)}
-a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
-#drop{border:2px dashed var(--border);padding:2em;text-align:center;margin:1em 0;background:var(--drop-bg);border-radius:4px}
-#drop.over{background:#1f2d3a;border-color:var(--link)}
-input[type=file],input[type=text]{background:var(--input-bg);color:var(--fg);border:1px solid var(--border);padding:.3em .5em;border-radius:3px}
-input[type=text]{margin-right:.3em}
-button{background:var(--input-bg);color:var(--fg);border:1px solid var(--border);padding:.3em .8em;border-radius:3px;cursor:pointer}
-button:hover{border-color:var(--link);color:var(--link)}
-.row{display:flex;gap:1em;align-items:center;margin:.2em 0;font-size:12px}
-.name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bar{width:200px;height:8px;background:var(--input-bg);border-radius:2px}
-.bar>div{height:100%;background:#238636;width:0}
-.ok{color:#238636}.err{color:#f85149}
-table{border-collapse:collapse;width:100%;margin-top:1em}
-td{padding:.3em .6em;border-bottom:1px solid var(--border)}
-td.size{text-align:right;color:#888;width:6em;white-space:nowrap}
-.dir a::before{content:"[D] "}
-h3{margin:1.5em 0 .5em;display:flex;justify-content:space-between;align-items:center}
-.actions{font-size:12px}
-.actions a,.actions button{margin-left:.8em}
+:root{--bg:#0f172a;--bg2:#1e293b;--fg:#f1f5f9;--fg-dim:#94a3b8;--accent:#cbd5e1;--accent-dark:#a0aec0;--success:#10b981;--error:#ef4444;--border:#334155;--border-light:#475569}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;margin:0;padding:1.2rem;max-width:1200px;margin:0 auto}
+h2{margin:0 0 0.8rem;font-size:1.6rem;font-weight:600;color:var(--accent)}
+h3{margin:0.8rem 0 0.6rem;font-size:0.85rem;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--fg-dim)}
+a{color:var(--accent);text-decoration:none;transition:color 0.2s}a:hover{color:var(--accent-dark)}
+#drop{border:2px dashed var(--border-light);padding:1.2rem;margin:0.8rem 0;background:rgba(99,102,241,0.03);border-radius:6px;text-align:center;cursor:pointer;transition:all 0.2s}
+#drop:hover,#drop.over{border-color:var(--accent);background:rgba(99,102,241,0.06)}
+input[type=file],input[type=text]{background:var(--bg2);color:var(--fg);border:1px solid var(--border);padding:0.4rem 0.6rem;border-radius:4px;font-size:13px;transition:border-color 0.2s}
+input[type=file]:focus,input[type=text]:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(99,102,241,0.1)}
+button{background:var(--bg2);color:var(--accent);border:1px solid var(--border-light);padding:0.4rem 0.8rem;border-radius:4px;cursor:pointer;font-weight:500;font-size:13px;transition:all 0.2s}
+button:hover{border-color:var(--accent);background:rgba(99,102,241,0.08)}
+button:disabled{opacity:0.4;cursor:not-allowed}
+.row{display:flex;gap:0.8rem;align-items:center;margin:0.1rem 0;font-size:12px;padding:0.2rem 0}
+.name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,monospace}
+.bar{width:100px;height:4px;background:var(--bg2);border-radius:2px;overflow:hidden}
+.bar>div{height:100%;background:linear-gradient(90deg,var(--accent),var(--success));width:0;transition:width 0.1s}
+.ok{color:var(--success)}.err{color:var(--error)}
+table{border-collapse:collapse;width:100%;margin-top:0.6rem;font-size:13px}
+tbody tr:hover{background:rgba(99,102,241,0.02)}
+td{padding:0.4rem 0.5rem;border-bottom:1px solid var(--border)}
+td.size{text-align:right;color:var(--fg-dim);width:4.5rem;font-family:ui-monospace,monospace;font-size:12px}
+.dir a::before{content:"📁 "}
+.actions{display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;font-size:13px}
+.stats{font-size:12px;color:var(--fg-dim);margin:0.6rem 0}
+.stats strong{color:var(--accent)}
 </style>
 <h2>__TITLE__</h2>
-<div id=drop>drop files/folders, or
- <input type=file multiple id=pick>
- <input type=file multiple webkitdirectory id=pickdir>
-</div>
-<div>queue: <span id=q>0</span> done: <span id=d>0</span> err: <span id=e>0</span></div>
+<div id=drop>drop files/folders, or <input type=file multiple id=pick></div>
+<div class=stats>queue: <strong id=q>0</strong> | done: <strong id=d>0</strong> | err: <strong id=e>0</strong></div>
 <div id=list></div>
-<h3>files
- <span class=actions>
-  <input type=text id=newfolder placeholder="folder name" style="width:120px">
-  <button onclick="createFolder()">Create</button>
-  <a href="?zip=1">📦 ZIP</a>
+<h3>files <span class=actions>
+  <button onclick="createFolder()">+ Create Folder</button>
+  <button onclick="zipAll()" title="entire directory">📦 All</button>
+  <button id=zipsel onclick="zipSelected()" disabled title="selected files">📦 Select</button>
  </span>
 </h3>
-<table>__ROWS__</table>
+<table id=ftable>__ROWS__</table>
 <script>
 const BASE=__BASE__;
 const drop=document.getElementById('drop'),list=document.getElementById('list');
@@ -89,22 +108,32 @@ function send(f){return new Promise(res=>{
  x.send(f);
 })}
 function createFolder(){
- const name=document.getElementById('newfolder').value.trim();
+ const name=prompt("Folder name:");
  if(!name)return;
  fetch(BASE+encodeURIComponent(name)+'/',{method:'POST'}).then(r=>{if(r.ok)location.reload()});
+}
+function zipAll(){
+ location.href='?zip=1';
+}
+function zipSelected(){
+ const paths=Array.from(document.querySelectorAll('.sel:checked')).map(cb=>cb.dataset.path);
+ if(!paths.length)return;
+ fetch(BASE+'?zip=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:paths})}).then(r=>r.blob()).then(blob=>{const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='archive.zip';a.click()});
+}
+function updateZipBtn(){
+ document.getElementById('zipsel').disabled=!document.querySelector('.sel:checked');
 }
 drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};
 drop.ondragleave=()=>drop.classList.remove('over');
 drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');add(e.dataTransfer.files)};
 document.getElementById('pick').onchange=e=>add(e.target.files);
-document.getElementById('pickdir').onchange=e=>add(e.target.files);
-document.getElementById('newfolder').onkeypress=e=>{if(e.key==='Enter')createFolder()};
+document.addEventListener('change',e=>{if(e.target.classList.contains('sel'))updateZipBtn()});
 </script>'''
 
 def render(url_path, dest):
     rows = []
     if url_path != '/':
-        rows.append('<tr class=dir><td><a href="../">../</a></td><td class=size></td></tr>')
+        rows.append('<tr class=dir><td style="width:20px"></td><td><a href="../">../</a></td><td class=size></td></tr>')
     try:
         entries = sorted(os.scandir(dest), key=lambda e: (not e.is_dir(), e.name.lower()))
     except OSError:
@@ -113,11 +142,11 @@ def render(url_path, dest):
         encoded = urllib.parse.quote(e.name)
         esc = html.escape(e.name)
         if e.is_dir():
-            rows.append(f'<tr class=dir><td><a href="{encoded}/">{esc}/</a></td><td class=size></td></tr>')
+            rows.append(f'<tr class=dir><td style="width:20px"><input type=checkbox class=sel data-path="{encoded}/"></td><td><a href="{encoded}/">{esc}/</a></td><td class=size></td></tr>')
         else:
             try: size = fmt_size(e.stat().st_size)
             except OSError: size = '?'
-            rows.append(f'<tr><td><a href="{encoded}">{esc}</a></td><td class=size>{size}</td></tr>')
+            rows.append(f'<tr><td style="width:20px"><input type=checkbox class=sel data-path="{encoded}"></td><td><a href="{encoded}">{esc}</a></td><td class=size>{size}</td></tr>')
     body = (PAGE
             .replace('__TITLE__', html.escape(url_path))
             .replace('__ROWS__', '\n'.join(rows))
@@ -160,17 +189,17 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_header('WWW-Authenticate', 'Basic realm="upload"')
             self.end_headers()
             return
-        
+
         raw = self.path.split('?', 1)[0]
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         rel = urllib.parse.unquote(raw.lstrip('/'))
         dest = safe_resolve(rel)
-        
+
         if dest is None:
             self.send_response(403); self.end_headers(); return
         if not os.path.exists(dest):
             self.send_response(404); self.end_headers(); return
-        
+
         if os.path.isdir(dest):
             if 'zip' in qs:
                 try:
@@ -216,7 +245,7 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_PUT(self):
         if not self.check_auth():
             self.send_response(401); self.send_header('WWW-Authenticate', 'Basic realm="upload"'); self.end_headers(); return
-        
+
         raw = self.path.split('?', 1)[0]
         rel = urllib.parse.unquote(raw.lstrip('/'))
         dest = safe_resolve(rel)
@@ -235,18 +264,47 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.check_auth():
             self.send_response(401); self.send_header('WWW-Authenticate', 'Basic realm="upload"'); self.end_headers(); return
-        
+
         raw = self.path.split('?', 1)[0]
-        rel = urllib.parse.unquote(raw.lstrip('/').rstrip('/'))
-        dest = safe_resolve(rel)
-        if dest is None:
-            self.send_response(403); self.end_headers(); return
-        
-        try:
-            os.makedirs(dest, exist_ok=True)
-            self.send_response(201); self.end_headers()
-        except OSError:
-            self.send_response(400); self.end_headers()
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        if 'zip' in qs:
+            # Selective ZIP download
+            content_len = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body)
+                files = data.get('files', [])
+            except:
+                files = []
+
+            rel = urllib.parse.unquote(raw.lstrip('/').rstrip('/'))
+            dest = safe_resolve(rel)
+            if dest is None:
+                self.send_response(403); self.end_headers(); return
+
+            try:
+                zdata = make_filtered_zip(dest, files)
+            except:
+                self.send_response(500); self.end_headers(); return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/zip')
+            self.send_header('Content-Length', str(len(zdata)))
+            self.send_header('Content-Disposition', 'attachment; filename="archive.zip"')
+            self.end_headers()
+            self.wfile.write(zdata)
+        else:
+            # Create folder
+            rel = urllib.parse.unquote(raw.lstrip('/').rstrip('/'))
+            dest = safe_resolve(rel)
+            if dest is None:
+                self.send_response(403); self.end_headers(); return
+
+            try:
+                os.makedirs(dest, exist_ok=True)
+                self.send_response(201); self.end_headers()
+            except OSError:
+                self.send_response(400); self.end_headers()
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
 print(f"serving on :{port}, root {ROOT}" + (f", auth {AUTH_USER}" if AUTH_USER else ""), file=sys.stderr)
