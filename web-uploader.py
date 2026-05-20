@@ -81,8 +81,8 @@ td.size{text-align:right;color:var(--fg-dim);width:4.5rem;font-family:ui-monospa
 <div id=list></div>
 <h3>files <span class=actions>
   <button onclick="createFolder()">+ Create Folder</button>
-  <button onclick="zipAll()" title="entire directory">📦 All</button>
-  <button id=zipsel onclick="zipSelected()" disabled title="selected files">📦 Select</button>
+  <button onclick="zipAll()" title="Zip entire directory">📦 Zip all</button>
+  <button id=zipsel onclick="zipSelected()" disabled title="Zip selected files">📦 Zip selected</button>
  </span>
 </h3>
 <table id=ftable>__ROWS__</table>
