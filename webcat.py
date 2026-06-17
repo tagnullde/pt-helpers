@@ -2,54 +2,50 @@
 import http.server, sys, os, urllib.parse, html, mimetypes, json, base64, zipfile, io
 
 def fmt_size(n):
-if n < 1024: return f"{n}B"
-for u in ('K','M','G','T'):
-n /= 1024
-if n < 1024: return f"{n:.1f}{u}"
-return f"{n:.1f}P"
+    if n < 1024: return f"{n}B"
+    for u in ('K','M','G','T'):
+        n /= 1024
+        if n < 1024: return f"{n:.1f}{u}"
+    return f"{n:.1f}P"
 
 def safe_resolve(path):
-"""Resolve an absolute path. In safe mode, restrict to ROOT subtree."""
-dest = os.path.realpath(path)
-if not UNSAFE:
-if dest != ROOT and not dest.startswith(ROOT + os.sep):
-return None
-return dest
-
-def url_for_path(abspath):
-"""Return the ?p= value for an absolute path."""
-return abspath
+    """Resolve an absolute path. In safe mode, restrict to ROOT subtree."""
+    dest = os.path.realpath(path)
+    if not UNSAFE:
+        if dest != ROOT and not dest.startswith(ROOT + os.sep):
+            return None
+    return dest
 
 def make_zip(dest):
-bio = io.BytesIO()
-with zipfile.ZipFile(bio, 'w', zipfile.ZIP_DEFLATED) as zf:
-for root, dirs, files in os.walk(dest):
-for f in files:
-path = os.path.join(root, f)
-arcname = os.path.relpath(path, dest)
-try: zf.write(path, arcname)
-except OSError: pass
-return bio.getvalue()
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(dest):
+            for f in files:
+                path = os.path.join(root, f)
+                arcname = os.path.relpath(path, dest)
+                try: zf.write(path, arcname)
+                except OSError: pass
+    return bio.getvalue()
 
 def make_filtered_zip(base_dir, rel_paths):
-bio = io.BytesIO()
-with zipfile.ZipFile(bio, 'w', zipfile.ZIP_DEFLATED) as zf:
-for rel in rel_paths:
-full = os.path.realpath(os.path.join(base_dir, rel))
-if not UNSAFE and not (full == base_dir or full.startswith(base_dir + os.sep)):
-continue
-if not os.path.exists(full): continue
-if os.path.isdir(full):
-for root, dirs, files in os.walk(full):
-for f in files:
-path = os.path.join(root, f)
-arcname = os.path.relpath(path, base_dir)
-try: zf.write(path, arcname)
-except OSError: pass
-else:
-try: zf.write(full, os.path.relpath(full, base_dir))
-except OSError: pass
-return bio.getvalue()
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for rel in rel_paths:
+            full = os.path.realpath(os.path.join(base_dir, rel))
+            if not UNSAFE and not (full == base_dir or full.startswith(base_dir + os.sep)):
+                continue
+            if not os.path.exists(full): continue
+            if os.path.isdir(full):
+                for root, dirs, files in os.walk(full):
+                    for f in files:
+                        path = os.path.join(root, f)
+                        arcname = os.path.relpath(path, base_dir)
+                        try: zf.write(path, arcname)
+                        except OSError: pass
+            else:
+                try: zf.write(full, os.path.relpath(full, base_dir))
+                except OSError: pass
+    return bio.getvalue()
 
 PAGE = '''<!doctype html><meta charset=utf-8><title>webcat</title>
 <style>
@@ -143,36 +139,36 @@ document.addEventListener('change',e=>{if(e.target.classList.contains('sel'))upd
 </script>'''
 
 def nav_url(abspath):
-return '/?p=' + urllib.parse.quote(abspath, safe='')
+    return '/?p=' + urllib.parse.quote(abspath, safe='')
 
 def render(abspath):
-title = abspath
-rows = []
-parent = os.path.dirname(abspath)
-# Show ../ unless we're at filesystem root (or safe mode at ROOT boundary)
-if abspath != parent:  # not at /
-if UNSAFE or (parent == ROOT or parent.startswith(ROOT + os.sep)):
-rows.append(f'<tr class=dir><td style="width:20px"></td><td><a href="{html.escape(nav_url(parent))}">../</a></td><td class=size></td></tr>')
-try:
-entries = sorted(os.scandir(abspath), key=lambda e: (not e.is_dir(), e.name.lower()))
-except OSError:
-entries = []
-for e in entries:
-child_abs = os.path.join(abspath, e.name)
-esc = html.escape(e.name)
-enc_nav = html.escape(nav_url(child_abs))
-enc_path = html.escape(urllib.parse.quote(e.name, safe=''))
-if e.is_dir():
-rows.append(f'<tr class=dir><td style="width:20px"><input type=checkbox class=sel data-path="{enc_path}/"></td><td><a href="{enc_nav}">{esc}/</a></td><td class=size></td></tr>')
-else:
-try: size = fmt_size(e.stat().st_size)
-except OSError: size = '?'
-rows.append(f'<tr><td style="width:20px"><input type=checkbox class=sel data-path="{enc_path}"></td><td><a href="/?dl=1&p={html.escape(urllib.parse.quote(child_abs, safe=""))}">{esc}</a></td><td class=size>{size}</td></tr>')
-body = (PAGE
-.replace('__TITLE__', html.escape(title))
-.replace('__ROWS__', '\n'.join(rows))
-.replace('__CURPATH__', json.dumps(abspath)))
-return body.encode('utf-8')
+    title = abspath
+    rows = []
+    parent = os.path.dirname(abspath)
+    # Show ../ unless we're at filesystem root (or safe mode at ROOT boundary)
+    if abspath != parent:  # not at /
+        if UNSAFE or (parent == ROOT or parent.startswith(ROOT + os.sep)):
+            rows.append(f'<tr class=dir><td style="width:20px"></td><td><a href="{html.escape(nav_url(parent))}">../</a></td><td class=size></td></tr>')
+    try:
+        entries = sorted(os.scandir(abspath), key=lambda e: (not e.is_dir(), e.name.lower()))
+    except OSError:
+        entries = []
+    for e in entries:
+        child_abs = os.path.join(abspath, e.name)
+        esc = html.escape(e.name)
+        enc_nav = html.escape(nav_url(child_abs))
+        enc_path = html.escape(urllib.parse.quote(e.name, safe=''))
+        if e.is_dir():
+            rows.append(f'<tr class=dir><td style="width:20px"><input type=checkbox class=sel data-path="{enc_path}/"></td><td><a href="{enc_nav}">{esc}/</a></td><td class=size></td></tr>')
+        else:
+            try: size = fmt_size(e.stat().st_size)
+            except OSError: size = '?'
+            rows.append(f'<tr><td style="width:20px"><input type=checkbox class=sel data-path="{enc_path}"></td><td><a href="/?dl=1&p={html.escape(urllib.parse.quote(child_abs, safe=""))}">{esc}</a></td><td class=size>{size}</td></tr>')
+    body = (PAGE
+        .replace('__TITLE__', html.escape(title))
+        .replace('__ROWS__', '\n'.join(rows))
+        .replace('__CURPATH__', json.dumps(abspath)))
+    return body.encode('utf-8')
 
 # Defaults
 ROOT = os.path.realpath(os.getcwd())
@@ -184,180 +180,180 @@ port = 8000
 args = sys.argv[1:]
 positional = []
 for arg in args:
-if arg == '--unsafe':
-UNSAFE = True
-elif arg.startswith('--user='):
-AUTH_USER = arg.split('=', 1)[1]
-elif arg.startswith('--pass='):
-AUTH_PASS = arg.split('=', 1)[1]
-else:
-positional.append(arg)
+    if arg == '--unsafe':
+        UNSAFE = True
+    elif arg.startswith('--user='):
+        AUTH_USER = arg.split('=', 1)[1]
+    elif arg.startswith('--pass='):
+        AUTH_PASS = arg.split('=', 1)[1]
+    else:
+        positional.append(arg)
 
 if len(positional) > 0:
-port = int(positional[0])
+    port = int(positional[0])
 if len(positional) > 1:
-ROOT = os.path.realpath(positional[1])
+    ROOT = os.path.realpath(positional[1])
 
 if bool(AUTH_USER) != bool(AUTH_PASS):
-print("Error: both --user and --pass required together", file=sys.stderr)
-sys.exit(1)
+    print("Error: both --user and --pass required together", file=sys.stderr)
+    sys.exit(1)
 
 class H(http.server.BaseHTTPRequestHandler):
-def check_auth(self):
-if not AUTH_USER: return True
-auth = self.headers.get('Authorization', '')
-if not auth.startswith('Basic '): return False
-try:
-decoded = base64.b64decode(auth[6:]).decode('utf-8')
-u, p = decoded.split(':', 1)
-return u == AUTH_USER and p == AUTH_PASS
-except:
-return False
+    def check_auth(self):
+        if not AUTH_USER: return True
+        auth = self.headers.get('Authorization', '')
+        if not auth.startswith('Basic '): return False
+        try:
+            decoded = base64.b64decode(auth[6:]).decode('utf-8')
+            u, p = decoded.split(':', 1)
+            return u == AUTH_USER and p == AUTH_PASS
+        except:
+            return False
 
-def log_message(self, fmt, *a):
-sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % a))
+    def log_message(self, fmt, *a):
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % a))
 
-def get_path_param(self, qs):
-"""Get and validate the ?p= parameter, defaulting to ROOT."""
-vals = qs.get('p', [])
-raw = vals[0] if vals else ROOT
-dest = safe_resolve(raw)
-return dest
+    def get_path_param(self, qs):
+        """Get and validate the ?p= parameter, defaulting to ROOT."""
+        vals = qs.get('p', [])
+        raw = vals[0] if vals else ROOT
+        dest = safe_resolve(raw)
+        return dest
 
-def do_GET(self):
-if not self.check_auth():
-self.send_response(401)
-self.send_header('WWW-Authenticate', 'Basic realm="upload"')
-self.end_headers(); return
+    def do_GET(self):
+        if not self.check_auth():
+            self.send_response(401)
+            self.send_header('WWW-Authenticate', 'Basic realm="upload"')
+            self.end_headers(); return
 
-parsed = urllib.parse.urlparse(self.path)
-qs = urllib.parse.parse_qs(parsed.query)
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
 
-# Download file
-if 'dl' in qs:
-dest = self.get_path_param(qs)
-if dest is None:
-self.send_response(403); self.end_headers(); return
-if not os.path.isfile(dest):
-self.send_response(404); self.end_headers(); return
-try:
-f = open(dest, 'rb')
-except OSError:
-self.send_response(403); self.end_headers(); return
-try:
-ctype, _ = mimetypes.guess_type(dest)
-self.send_response(200)
-self.send_header('Content-Type', ctype or 'application/octet-stream')
-self.send_header('Content-Length', str(os.path.getsize(dest)))
-self.end_headers()
-while True:
-chunk = f.read(65536)
-if not chunk: break
-try: self.wfile.write(chunk)
-except (BrokenPipeError, ConnectionResetError): break
-finally:
-f.close()
-return
+        # Download file
+        if 'dl' in qs:
+            dest = self.get_path_param(qs)
+            if dest is None:
+                self.send_response(403); self.end_headers(); return
+            if not os.path.isfile(dest):
+                self.send_response(404); self.end_headers(); return
+            try:
+                f = open(dest, 'rb')
+            except OSError:
+                self.send_response(403); self.end_headers(); return
+            try:
+                ctype, _ = mimetypes.guess_type(dest)
+                self.send_response(200)
+                self.send_header('Content-Type', ctype or 'application/octet-stream')
+                self.send_header('Content-Length', str(os.path.getsize(dest)))
+                self.end_headers()
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk: break
+                    try: self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError): break
+            finally:
+                f.close()
+            return
 
-# Zip entire directory
-if 'zip' in qs:
-dest = self.get_path_param(qs)
-if dest is None or not os.path.isdir(dest):
-self.send_response(403); self.end_headers(); return
-try:
-zdata = make_zip(dest)
-except Exception:
-self.send_response(500); self.end_headers(); return
-self.send_response(200)
-self.send_header('Content-Type', 'application/zip')
-self.send_header('Content-Length', str(len(zdata)))
-self.send_header('Content-Disposition', 'attachment; filename="archive.zip"')
-self.end_headers()
-self.wfile.write(zdata)
-return
+        # Zip entire directory
+        if 'zip' in qs:
+            dest = self.get_path_param(qs)
+            if dest is None or not os.path.isdir(dest):
+                self.send_response(403); self.end_headers(); return
+            try:
+                zdata = make_zip(dest)
+            except Exception:
+                self.send_response(500); self.end_headers(); return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/zip')
+            self.send_header('Content-Length', str(len(zdata)))
+            self.send_header('Content-Disposition', 'attachment; filename="archive.zip"')
+            self.end_headers()
+            self.wfile.write(zdata)
+            return
 
-# Directory listing (default)
-dest = self.get_path_param(qs)
-if dest is None:
-self.send_response(403); self.end_headers(); return
-if not os.path.exists(dest):
-self.send_response(404); self.end_headers(); return
-if not os.path.isdir(dest):
-# redirect to dl
-self.send_response(302)
-self.send_header('Location', '/?dl=1&p=' + urllib.parse.quote(dest, safe=''))
-self.end_headers(); return
+        # Directory listing (default)
+        dest = self.get_path_param(qs)
+        if dest is None:
+            self.send_response(403); self.end_headers(); return
+        if not os.path.exists(dest):
+            self.send_response(404); self.end_headers(); return
+        if not os.path.isdir(dest):
+            # redirect to dl
+            self.send_response(302)
+            self.send_header('Location', '/?dl=1&p=' + urllib.parse.quote(dest, safe=''))
+            self.end_headers(); return
 
-body = render(dest)
-self.send_response(200)
-self.send_header('Content-Type', 'text/html; charset=utf-8')
-self.send_header('Content-Length', str(len(body)))
-self.end_headers()
-self.wfile.write(body)
+        body = render(dest)
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-def do_PUT(self):
-if not self.check_auth():
-self.send_response(401); self.send_header('WWW-Authenticate', 'Basic realm="upload"'); self.end_headers(); return
+    def do_PUT(self):
+        if not self.check_auth():
+            self.send_response(401); self.send_header('WWW-Authenticate', 'Basic realm="upload"'); self.end_headers(); return
 
-parsed = urllib.parse.urlparse(self.path)
-qs = urllib.parse.parse_qs(parsed.query)
-dest = self.get_path_param(qs)
-if dest is None:
-self.send_response(403); self.end_headers(); return
-os.makedirs(os.path.dirname(dest), exist_ok=True)
-n = int(self.headers.get('Content-Length', '0'))
-with open(dest, 'wb') as f:
-r = n
-while r > 0:
-chunk = self.rfile.read(min(65536, r))
-if not chunk: break
-f.write(chunk); r -= len(chunk)
-self.send_response(201); self.end_headers()
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        dest = self.get_path_param(qs)
+        if dest is None:
+            self.send_response(403); self.end_headers(); return
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        n = int(self.headers.get('Content-Length', '0'))
+        with open(dest, 'wb') as f:
+            r = n
+            while r > 0:
+                chunk = self.rfile.read(min(65536, r))
+                if not chunk: break
+                f.write(chunk); r -= len(chunk)
+        self.send_response(201); self.end_headers()
 
-def do_POST(self):
-if not self.check_auth():
-self.send_response(401); self.send_header('WWW-Authenticate', 'Basic realm="upload"'); self.end_headers(); return
+    def do_POST(self):
+        if not self.check_auth():
+            self.send_response(401); self.send_header('WWW-Authenticate', 'Basic realm="upload"'); self.end_headers(); return
 
-parsed = urllib.parse.urlparse(self.path)
-qs = urllib.parse.parse_qs(parsed.query)
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
 
-# Selective zip
-if 'zipsel' in qs:
-dest = self.get_path_param(qs)
-if dest is None or not os.path.isdir(dest):
-self.send_response(403); self.end_headers(); return
-content_len = int(self.headers.get('Content-Length', 0))
-body = self.rfile.read(content_len)
-try:
-data = json.loads(body)
-files = data.get('files', [])
-except:
-files = []
-try:
-zdata = make_filtered_zip(dest, files)
-except Exception:
-self.send_response(500); self.end_headers(); return
-self.send_response(200)
-self.send_header('Content-Type', 'application/zip')
-self.send_header('Content-Length', str(len(zdata)))
-self.send_header('Content-Disposition', 'attachment; filename="archive.zip"')
-self.end_headers()
-self.wfile.write(zdata)
-return
+        # Selective zip
+        if 'zipsel' in qs:
+            dest = self.get_path_param(qs)
+            if dest is None or not os.path.isdir(dest):
+                self.send_response(403); self.end_headers(); return
+            content_len = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body)
+                files = data.get('files', [])
+            except:
+                files = []
+            try:
+                zdata = make_filtered_zip(dest, files)
+            except Exception:
+                self.send_response(500); self.end_headers(); return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/zip')
+            self.send_header('Content-Length', str(len(zdata)))
+            self.send_header('Content-Disposition', 'attachment; filename="archive.zip"')
+            self.end_headers()
+            self.wfile.write(zdata)
+            return
 
-# Create folder
-if 'mkdir' in qs:
-dest = self.get_path_param(qs)
-if dest is None:
-self.send_response(403); self.end_headers(); return
-try:
-os.makedirs(dest, exist_ok=True)
-self.send_response(201); self.end_headers()
-except OSError:
-self.send_response(400); self.end_headers()
-return
+        # Create folder
+        if 'mkdir' in qs:
+            dest = self.get_path_param(qs)
+            if dest is None:
+                self.send_response(403); self.end_headers(); return
+            try:
+                os.makedirs(dest, exist_ok=True)
+                self.send_response(201); self.end_headers()
+            except OSError:
+                self.send_response(400); self.end_headers()
+            return
 
-self.send_response(400); self.end_headers()
+        self.send_response(400); self.end_headers()
 
 print(f"serving on :{port}, root {ROOT}" + (f", auth {AUTH_USER}" if AUTH_USER else "") + (" [UNSAFE - no chroot]" if UNSAFE else ""), file=sys.stderr)
 http.server.ThreadingHTTPServer(('0.0.0.0', port), H).serve_forever()
