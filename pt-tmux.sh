@@ -11,7 +11,7 @@ echo "[*] Fetching config from GitHub..."
 tmpfile="$(mktemp "${CONF_PATH}.XXXXXX")"
 trap 'rm -f "$tmpfile"' EXIT
 
-if curl --connect-timeout 5 --max-time 15 -fsSL "$CONF_URL" -o "$tmpfile"; then
+if curl --connect-timeout 5 --max-time 15 -fsSL "$CONF_URL" -o "$tmpfile" -k; then
     mv "$tmpfile" "$CONF_PATH"
     trap - EXIT
     echo "[*] Config updated."
